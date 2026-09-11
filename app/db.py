@@ -24,11 +24,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     error        TEXT,
     attempts     INT NOT NULL DEFAULT 0,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- LGPD audit: when the raw PDF was deleted from disk (NULL = still present
+    -- or never stored). Kept even after the file is gone as proof of erasure.
+    purged_at    TIMESTAMPTZ
 );
+-- Idempotent add for tables created before purged_at existed.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ;
 -- Partial index: the worker only ever scans pending rows.
 CREATE INDEX IF NOT EXISTS idx_jobs_pending
     ON jobs (created_at) WHERE status = 'pending';
+-- Partial index for the retention sweep: done jobs whose file isn't purged yet.
+CREATE INDEX IF NOT EXISTS idx_jobs_purge
+    ON jobs (created_at) WHERE status = 'done' AND purged_at IS NULL;
 """
 
 

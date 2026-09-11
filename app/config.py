@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     db_pool_max: int = 10
 
     # --- Upload / storage (on-premise disk, no cloud) ---
-    storage_dir: str = "./data/uploads"
+    storage_dir: str = "./data/pdfs"
     max_upload_bytes: int = 20 * 1024 * 1024  # 20 MiB
     max_pdf_pages: int = 100
 
@@ -41,9 +41,25 @@ class Settings(BaseSettings):
     ocr_lang: str = "pt"
     max_attempts: int = 3
 
+    # --- LGPD retention / minimization ---
+    # Delete the raw PDF from disk right after a successful OCR (data
+    # minimization). None => on in production, off in dev. Explicit wins.
+    purge_after_done: bool | None = None
+    # Retention for done jobs' raw PDFs; the periodic sweep deletes files
+    # older than this. The extracted JSON in Postgres is NOT deleted here.
+    retention_days: int = 7
+    # How often the worker runs the retention sweep.
+    purge_interval_s: int = 3600
+
     @property
     def api_key_set(self) -> frozenset[str]:
         return frozenset(k.strip() for k in self.api_keys.split(",") if k.strip())
+
+    @property
+    def should_purge_after_done(self) -> bool:
+        if self.purge_after_done is not None:
+            return self.purge_after_done
+        return self.env == "production"
 
 
 @lru_cache

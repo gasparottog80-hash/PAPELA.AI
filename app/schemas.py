@@ -22,6 +22,7 @@ class JobStatus(BaseModel):
     attempts: int
     created_at: datetime
     updated_at: datetime
+    purged_at: Optional[datetime] = None
 
 
 class ErrorResponse(BaseModel):

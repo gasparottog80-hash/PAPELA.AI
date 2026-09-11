@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import logging
-import uuid
 from typing import Any, Optional
 
 from psycopg.rows import dict_row
@@ -24,9 +22,14 @@ class JobRepository:
         self._pool = pool
 
     def create(
-        self, *, filename: str, storage_path: str, size_bytes: int, pages: int
+        self,
+        *,
+        job_id: str,
+        filename: str,
+        storage_path: str,
+        size_bytes: int,
+        pages: int,
     ) -> str:
-        job_id = str(uuid.uuid4())
         with self._pool.connection() as conn:
             conn.execute(
                 """
@@ -43,7 +46,7 @@ class JobRepository:
             cur.execute(
                 """
                 SELECT id::text, status, filename, pages, result, error,
-                       attempts, created_at, updated_at
+                       attempts, created_at, updated_at, purged_at
                 FROM jobs WHERE id = %s
                 """,
                 (job_id,),
@@ -80,15 +83,47 @@ class JobRepository:
                 )
                 return row
 
-    def mark_done(self, job_id: str, result: dict[str, Any]) -> None:
+    def mark_done(
+        self, job_id: str, result: dict[str, Any], *, purged: bool = False
+    ) -> None:
+        """Mark a job done. If `purged`, also stamp purged_at now (the raw PDF
+        was deleted in the same step for data minimization)."""
         with self._pool.connection() as conn:
             conn.execute(
                 """
                 UPDATE jobs
-                SET status = 'done', result = %s, error = NULL, updated_at = now()
+                SET status = 'done',
+                    result = %s,
+                    error = NULL,
+                    purged_at = CASE WHEN %s THEN now() ELSE purged_at END,
+                    updated_at = now()
                 WHERE id = %s
                 """,
-                (Jsonb(result), job_id),
+                (Jsonb(result), purged, job_id),
+            )
+
+    def expired_done_jobs(self, *, retention_days: int) -> list[str]:
+        """job_ids of done jobs older than retention whose raw PDF is not yet
+        purged. Drives the periodic retention sweep."""
+        with self._pool.connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id::text
+                FROM jobs
+                WHERE status = 'done'
+                  AND purged_at IS NULL
+                  AND created_at < now() - make_interval(days => %s)
+                """,
+                (retention_days,),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def mark_purged(self, job_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE jobs SET purged_at = now(), updated_at = now() WHERE id = %s",
+                (job_id,),
             )
 
     def mark_failed(self, job_id: str, error: str, *, max_attempts: int) -> None:

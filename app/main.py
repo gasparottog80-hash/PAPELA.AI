@@ -12,7 +12,12 @@ from .db import Database
 from .repository import JobRepository
 from .schemas import ErrorResponse, JobStatus, UploadAccepted
 from .security import RateLimiter, require_api_key
-from .storage import InvalidPdfError, _safe_name, save_and_validate
+from .storage import (
+    InvalidPdfError,
+    pdf_exists,
+    safe_name,
+    save_pdf_chunked,
+)
 
 logger = logging.getLogger("papela.api")
 
@@ -99,10 +104,12 @@ async def upload(
             ).model_dump(),
         )
 
+    repo: JobRepository = request.app.state.repo
+    job_id = str(uuid.uuid4())
     try:
-        storage_path, size, pages = save_and_validate(
+        storage_path, size, pages = save_pdf_chunked(
             stream=file.file,
-            filename=file.filename or "upload.pdf",
+            job_id=job_id,
             storage_dir=settings.storage_dir,
             max_bytes=settings.max_upload_bytes,
             max_pages=settings.max_pdf_pages,
@@ -114,9 +121,9 @@ async def upload(
             content=ErrorResponse(request_id=request_id, error=str(exc)).model_dump(),
         )
 
-    repo: JobRepository = request.app.state.repo
-    job_id = repo.create(
-        filename=_safe_name(file.filename or "upload.pdf"),
+    repo.create(
+        job_id=job_id,
+        filename=safe_name(file.filename or "upload.pdf"),
         storage_path=storage_path,
         size_bytes=size,
         pages=pages,
@@ -146,3 +153,34 @@ async def get_job(
             ).model_dump(),
         )
     return JobStatus(**row)
+
+
+@app.get(
+    "/v1/jobs/{job_id}/audit",
+    responses={401: {}, 404: {"model": ErrorResponse}},
+)
+async def get_job_audit(
+    job_id: str,
+    request: Request,
+    api_key: str = Depends(require_api_key),
+):
+    """LGPD audit view: whether the raw PDF still exists on disk vs. purged.
+    Cross-checks the DB purged_at stamp against the actual filesystem so
+    drift (file gone but not stamped, or vice-versa) is visible."""
+    _enforce_rate_limit(request, api_key)
+    repo: JobRepository = request.app.state.repo
+    row = repo.get(job_id)
+    if row is None:
+        return JSONResponse(
+            status_code=404,
+            content=ErrorResponse(
+                request_id=request.state.request_id, error="job not found"
+            ).model_dump(),
+        )
+    settings = get_settings()
+    return {
+        "job_id": row["id"],
+        "status": row["status"],
+        "purged_at": row["purged_at"].isoformat() if row["purged_at"] else None,
+        "file_exists": pdf_exists(job_id, settings.storage_dir),
+    }

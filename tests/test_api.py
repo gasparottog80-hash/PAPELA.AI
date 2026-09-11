@@ -16,10 +16,11 @@ os.environ.setdefault("PAPELA_API_KEYS", "test-key")
 os.environ.setdefault("PAPELA_OCR_ENGINE", "fake")
 os.environ.setdefault("PAPELA_STORAGE_DIR", "./data/test-uploads")
 
-from app.config import get_settings  # noqa: E402
+from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ocr import build_engine  # noqa: E402
 from app.repository import JobRepository  # noqa: E402
+from app.storage import pdf_exists, purge_expired_jobs  # noqa: E402
 from app.worker import process_one  # noqa: E402
 
 AUTH = {"X-API-Key": "test-key"}
@@ -103,3 +104,51 @@ def test_upload_rejects_non_pdf(client: TestClient):
     )
     assert r.status_code == 400
     assert "PDF" in r.json()["error"]
+
+
+def _upload(client: TestClient) -> str:
+    r = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={"file": ("nota.pdf", io.BytesIO(_minimal_pdf()), "application/pdf")},
+    )
+    assert r.status_code == 202, r.text
+    return r.json()["job_id"]
+
+
+def test_purge_after_done_deletes_pdf_and_stamps_audit(client: TestClient):
+    # LGPD data minimization: with purge_after_done, the raw PDF must be gone
+    # from disk the moment the job is done, and the audit must reflect it.
+    s = get_settings()
+    job_id = _upload(client)
+    assert pdf_exists(job_id, s.storage_dir) is True
+
+    purge_settings = s.model_copy(update={"purge_after_done": True})
+    repo = JobRepository(app.state.db.pool)
+    engine = build_engine(s.ocr_engine, s.ocr_lang)
+    assert process_one(repo, engine, purge_settings) is True
+
+    assert pdf_exists(job_id, s.storage_dir) is False
+    audit = client.get(f"/v1/jobs/{job_id}/audit", headers=AUTH).json()
+    assert audit["file_exists"] is False
+    assert audit["purged_at"] is not None
+    # Extracted JSON survives in Postgres even after the PDF is gone.
+    assert client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["status"] == "done"
+
+
+def test_retention_sweep_purges_expired_only(client: TestClient):
+    # CRITICAL EDGE: sweep must purge done jobs past retention and leave
+    # in-retention ones untouched.
+    s = get_settings()
+    job_id = _upload(client)
+    repo = JobRepository(app.state.db.pool)
+    engine = build_engine(s.ocr_engine, s.ocr_lang)
+    process_one(repo, engine, s)  # done, PDF kept (test env => no purge)
+    assert pdf_exists(job_id, s.storage_dir) is True
+
+    # retention_days=0 => everything done is expired.
+    n = purge_expired_jobs(repo, s.storage_dir, retention_days=0)
+    assert n == 1
+    assert pdf_exists(job_id, s.storage_dir) is False
+    # Idempotent: a second sweep finds nothing (purged_at already set).
+    assert purge_expired_jobs(repo, s.storage_dir, retention_days=0) == 0

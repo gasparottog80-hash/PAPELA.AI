@@ -1,3 +1,14 @@
+x-app-env: &app-env
+  # Inside the compose network the DB host is `postgres:5432`. The host-side
+  # 5433 mapping below is only for local dev tools on your machine.
+  PAPELA_DATABASE_URL: postgresql://papela:papela@postgres:5432/papela
+  PAPELA_API_KEYS: ${PAPELA_API_KEYS:-dev-key-change-me}
+  PAPELA_OCR_ENGINE: ${PAPELA_OCR_ENGINE:-fake}
+  PAPELA_ENV: ${PAPELA_ENV:-development}
+  PAPELA_LOG_LEVEL: ${PAPELA_LOG_LEVEL:-INFO}
+  PAPELA_STORAGE_DIR: /data/pdfs
+  PAPELA_RETENTION_DAYS: ${PAPELA_RETENTION_DAYS:-7}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,5 +26,37 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  api:
+    build: .
+    environment:
+      <<: *app-env
+    ports:
+      - "8077:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - papela_pdfs:/data/pdfs
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-env
+      # In prod the worker purges the raw PDF right after a successful OCR.
+      PAPELA_PURGE_AFTER_DONE: ${PAPELA_PURGE_AFTER_DONE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # Shared with the API: API writes PDFs here, worker reads + purges them.
+      - papela_pdfs:/data/pdfs
+
 volumes:
   pgdata:
+  papela_pdfs:

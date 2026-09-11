@@ -9,6 +9,7 @@ from .config import Settings, get_settings
 from .db import Database
 from .ocr import OcrEngine, build_engine
 from .repository import JobRepository
+from .storage import delete_pdf, purge_expired_jobs
 
 logger = logging.getLogger("papela.worker")
 
@@ -27,15 +28,21 @@ def process_one(repo: JobRepository, engine: OcrEngine, settings: Settings) -> b
     if job is None:
         return False
 
-    job_id = job["id"]
-    logger.info("job.claimed", extra={"request_id": str(job_id)})
+    job_id = str(job["id"])
+    logger.info("job.claimed", extra={"request_id": job_id})
     try:
         result = engine.extract(job["storage_path"])
-        repo.mark_done(str(job_id), result)
-        logger.info("job.done", extra={"request_id": str(job_id)})
+        purge_now = settings.should_purge_after_done
+        if purge_now:
+            # Data minimization: drop the raw PDF the moment we no longer need
+            # it, in the SAME step we persist the extracted text, so there is
+            # no window where a done job still has a sensitive file on disk.
+            delete_pdf(job_id, settings.storage_dir, reason="purge-after-done")
+        repo.mark_done(job_id, result, purged=purge_now)
+        logger.info("job.done", extra={"request_id": job_id})
     except Exception as exc:  # noqa: BLE001 - isolate per-job failure
-        logger.exception("job.failed", extra={"request_id": str(job_id)})
-        repo.mark_failed(str(job_id), str(exc), max_attempts=settings.max_attempts)
+        logger.exception("job.failed", extra={"request_id": job_id})
+        repo.mark_failed(job_id, str(exc), max_attempts=settings.max_attempts)
     return True
 
 
@@ -52,13 +59,27 @@ def run() -> None:
     db.open()
     repo = JobRepository(db.pool)
     engine = build_engine(settings.ocr_engine, settings.ocr_lang)
-    logger.info(
-        "worker.started", extra={"request_id": None}
-    )
+    logger.info("worker.started", extra={"request_id": None})
 
     idle_backoff = 0.5
+    last_sweep = 0.0
     try:
         while _running:
+            now = time.monotonic()
+            # Periodic LGPD retention sweep (belt-and-suspenders: even if
+            # purge-after-done is off, nothing outlives retention_days).
+            if now - last_sweep >= settings.purge_interval_s:
+                try:
+                    n = purge_expired_jobs(
+                        repo, settings.storage_dir,
+                        retention_days=settings.retention_days,
+                    )
+                    if n:
+                        logger.info("retention.purged", extra={"request_id": None})
+                except Exception:  # noqa: BLE001 - sweep must never kill worker
+                    logger.exception("retention.sweep_failed", extra={"request_id": None})
+                last_sweep = now
+
             did_work = process_one(repo, engine, settings)
             if not did_work:
                 time.sleep(idle_backoff)
