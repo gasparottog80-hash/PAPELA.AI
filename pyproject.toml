@@ -20,11 +20,13 @@ dev = [
     "httpx>=0.27",
 ]
 # Heavy OCR runtime deps, installed only where the worker actually runs OCR.
+# Pinned to the PaddleOCR 2.x line: PPStructure API + numpy<2 (paddle 2.x is
+# not compatible with numpy 2). PP-Structure needs these for table recognition.
 ocr = [
-    "paddleocr>=2.9",
-    "paddlepaddle>=2.6",
+    "paddleocr>=2.7,<2.10",
+    "paddlepaddle>=2.5,<3",
     "pymupdf>=1.24",
-    "numpy>=1.26",
+    "numpy>=1.24,<2",
 ]
 
 [tool.pytest.ini_options]

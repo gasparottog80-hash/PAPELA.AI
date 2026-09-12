@@ -37,7 +37,10 @@ class Settings(BaseSettings):
     rate_limit_per_min: int = 60
 
     # --- OCR ---
-    ocr_engine: str = "fake"  # "fake" | "paddle"
+    # "fake"  = dev/CI, no model download
+    # "paddle" = text-only PaddleOCR (on-prem)
+    # "ppstructure" = layout + table recognition (on-prem, structured tables)
+    ocr_engine: str = "fake"  # "fake" | "paddle" | "ppstructure"
     ocr_lang: str = "pt"
     max_attempts: int = 3
 

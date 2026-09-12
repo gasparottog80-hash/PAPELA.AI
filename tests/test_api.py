@@ -87,6 +87,16 @@ def test_upload_and_process_end_to_end(client: TestClient):
     assert body["status"] == "done"
     assert body["result"]["engine"] == "fake"
     assert body["result"]["page_count"] == 1
+    # Schema v2: structured tables must survive the round-trip to Postgres JSONB
+    # and back out through the API.
+    assert body["result"]["schema_version"] == 2
+    page = body["result"]["pages"][0]
+    assert "tables" in page
+    assert len(page["tables"]) == 1
+    table = page["tables"][0]
+    assert table["n_rows"] == 3 and table["n_cols"] == 2
+    assert table["rows"][0] == ["Item", "Valor"]
+    assert table["rows"][2] == ["Servico B", "250,50"]
 
 
 def test_upload_requires_api_key(client: TestClient):
