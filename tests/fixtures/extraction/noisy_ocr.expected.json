@@ -1,0 +1,10 @@
+{
+  "numero_nf": "000045",
+  "data_emissao": "2024-01-03",
+  "valor_total": "250.50",
+  "cnpjs": ["11122233000183"],
+  "cpfs": ["55566677720"],
+  "emitente_cnpj": {"digits": "11122233000183", "role_source": "label"},
+  "destinatario_cnpj": null,
+  "itens": []
+}

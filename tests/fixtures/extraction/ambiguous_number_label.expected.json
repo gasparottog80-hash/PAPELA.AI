@@ -1,0 +1,10 @@
+{
+  "numero_nf": null,
+  "data_emissao": null,
+  "valor_total": null,
+  "cnpjs": [],
+  "cpfs": [],
+  "emitente_cnpj": null,
+  "destinatario_cnpj": null,
+  "itens": []
+}

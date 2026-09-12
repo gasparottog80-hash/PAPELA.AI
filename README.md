@@ -91,10 +91,34 @@ Relevant env vars (see `.env.example`):
     docker compose up -d postgres --wait
     uv run pytest                          # skips gracefully if Postgres unreachable
 
+## Fiscal field extraction (deterministic)
+
+After OCR, the worker runs `app/extract.py` over the OCR payload (text +
+structured tables) and attaches `result["fields"]`. 100% deterministic —
+regex + heuristics + check-digit validation, no LLM, no external calls (LGPD:
+runs on the already-local result). It never raises: any sub-extractor failure
+degrades to null/empty and is logged without document content.
+
+Fields (schema v3, `result.fields`):
+
+- `emitente_cnpj` / `destinatario_cnpj` — `{value, digits, valid, role,
+  role_source}`. `valid` is the mod-11 check-digit result (kills most regex
+  false positives). `role_source` is `label` (from an explicit
+  Emitente/Destinatário keyword) or `position` (two-unlabeled-CNPJ fallback).
+- `cnpjs` / `cpfs` — every distinct document found, each check-digit validated.
+- `numero_nf` — NF number; boundary-guarded so it never grabs a slice of the
+  44-digit NFe access key.
+- `data_emissao` — ISO date, label-anchored with a first-date fallback.
+- `valor_total` — pt-BR money parsed to a `"1590.00"` string (exact, no float).
+- `itens` — line items from structured tables: `{descricao, quantidade,
+  valor_unitario, valor_total, codigo, raw}` (columns mapped from the header;
+  money as strings). Unmappable tables are skipped, not turned into garbage.
+
 ## Scope / next steps
 
-- OCR result today = per-page text + confidence in JSONB. Fiscal field extraction
-  (CNPJ, valor, itens) is the deferred local-LLM classification step.
-- Known limits: rate limiter is per-process (single node); move to Postgres/Redis
-  to scale out. No schema migrations tool yet (idempotent DDL on startup). No
-  retention sweep on the extracted JSON yet (only on raw PDFs).
+- Extraction is heuristic (label + table driven). Accuracy must be measured
+  against a real anonymized DANFE/NFS-e corpus before any SLA claim; add a
+  labeled fixture set + per-field accuracy report.
+- Known limits: rate limiter is per-process (single node); move to
+  Postgres/Redis to scale out. No schema migrations tool yet (idempotent DDL
+  on startup). No retention sweep on the extracted JSON yet (only on raw PDFs).

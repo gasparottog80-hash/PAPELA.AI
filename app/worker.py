@@ -7,6 +7,7 @@ from types import FrameType
 
 from .config import Settings, get_settings
 from .db import Database
+from .extract import extract_fields
 from .ocr import OcrEngine, build_engine
 from .repository import JobRepository
 from .sanitize import sanitize_error
@@ -38,6 +39,11 @@ def process_one(repo: JobRepository, engine: OcrEngine, settings: Settings) -> b
     logger.info("job.claimed", extra={"request_id": job_id})
     try:
         result = engine.extract(job["storage_path"])
+        # Deterministic fiscal-field extraction over the OCR payload (text +
+        # structured tables). Additive: attaches result["fields"]. extract_fields
+        # never raises, so a bad extraction degrades to nulls instead of failing
+        # an otherwise-good OCR job.
+        result["fields"] = extract_fields(result)
         purge_now = settings.purge_after_done
         # 1) Persist the result first (data safety).
         repo.mark_done(job_id, result, purged=purge_now)

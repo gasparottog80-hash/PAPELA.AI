@@ -1,0 +1,10 @@
+{
+  "numero_nf": null,
+  "data_emissao": null,
+  "valor_total": null,
+  "cnpjs": ["11122233000183", "55566677000183"],
+  "cpfs": ["11122233396"],
+  "emitente_cnpj": {"digits": "11122233000183", "role_source": "position"},
+  "destinatario_cnpj": {"digits": "55566677000183", "role_source": "position"},
+  "itens": []
+}

@@ -1,0 +1,13 @@
+{
+  "engine": "fixture",
+  "schema_version": 3,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "confidence": 1.0,
+      "text": "DANFE Nota Fiscal Eletronica\nCHAVE DE ACESSO 35240514200166000187550010001234561123456789\n",
+      "tables": []
+    }
+  ]
+}

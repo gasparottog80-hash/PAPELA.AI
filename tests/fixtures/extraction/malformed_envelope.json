@@ -1,0 +1,14 @@
+{
+  "engine": "fixture",
+  "schema_version": 3,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "text": null,
+      "tables": [
+        {"table_id": 0, "rows": null}
+      ]
+    }
+  ]
+}

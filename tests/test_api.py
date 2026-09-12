@@ -87,9 +87,9 @@ def test_upload_and_process_end_to_end(client: TestClient):
     assert body["status"] == "done"
     assert body["result"]["engine"] == "fake"
     assert body["result"]["page_count"] == 1
-    # Schema v2: structured tables must survive the round-trip to Postgres JSONB
+    # Schema v3: structured tables must survive the round-trip to Postgres JSONB
     # and back out through the API.
-    assert body["result"]["schema_version"] == 2
+    assert body["result"]["schema_version"] == 3
     page = body["result"]["pages"][0]
     assert "tables" in page
     assert len(page["tables"]) == 1
@@ -97,6 +97,15 @@ def test_upload_and_process_end_to_end(client: TestClient):
     assert table["n_rows"] == 3 and table["n_cols"] == 2
     assert table["rows"][0] == ["Item", "Valor"]
     assert table["rows"][2] == ["Servico B", "250,50"]
+    # v3: deterministic fiscal fields extracted from the OCR payload survive the
+    # JSONB round-trip. The fake table (Item/Valor -> Servico A/100,00, Servico
+    # B/250,50) must yield two line items with parsed pt-BR money.
+    fields = body["result"]["fields"]
+    assert fields["extractor_version"] == 1
+    assert len(fields["itens"]) == 2
+    assert fields["itens"][0]["descricao"] == "Servico A"
+    assert fields["itens"][0]["valor_total"] == "100.00"
+    assert fields["itens"][1]["valor_total"] == "250.50"
 
 
 def test_upload_requires_api_key(client: TestClient):

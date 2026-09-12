@@ -1,0 +1,13 @@
+{
+  "engine": "fixture",
+  "schema_version": 3,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "confidence": 1.0,
+      "text": "RECIBO SEM LABELS DE PAPEL\n11.122.233/0001-83 EMPRESA A\n55.566.677/0001-83 EMPRESA B\nCPF associado: 111.222.333-96\n",
+      "tables": []
+    }
+  ]
+}

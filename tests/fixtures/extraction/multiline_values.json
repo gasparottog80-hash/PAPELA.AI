@@ -1,0 +1,13 @@
+{
+  "engine": "fixture",
+  "schema_version": 3,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "confidence": 0.7,
+      "text": "NOTA FISCAL ELETRONICA No 000000099\nEMIT\nENTE: FORNECEDOR MULTILINHA LTDA\nCNPJ 12.345.678/0001-95\nDESTI\nNATARIO: CLIENTE MULTILINHA\nCNPJ 98.765.432/0001-98\nData de Emissao:\n20/07/2024\nValor Total da Nota:\nR$ 800,00\n",
+      "tables": []
+    }
+  ]
+}

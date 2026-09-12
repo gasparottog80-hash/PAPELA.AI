@@ -1,0 +1,12 @@
+{
+  "numero_nf": "000000777",
+  "data_emissao": "2024-06-20",
+  "valor_total": "500.00",
+  "cnpjs": ["12345678000195", "98765432000198"],
+  "cpfs": [],
+  "emitente_cnpj": {"digits": "12345678000195", "role_source": "label"},
+  "destinatario_cnpj": {"digits": "98765432000198", "role_source": "label"},
+  "itens": [
+    {"descricao": "Servico Unico", "quantidade": "1", "valor_unitario": "500.00", "valor_total": "500.00"}
+  ]
+}

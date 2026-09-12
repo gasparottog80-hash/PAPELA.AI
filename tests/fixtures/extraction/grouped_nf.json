@@ -1,0 +1,26 @@
+{
+  "engine": "fixture",
+  "schema_version": 3,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "confidence": 1.0,
+      "text": "DANFE - Documento Auxiliar da NFe\nNOTA FISCAL ELETRONICA No 000000042 SERIE 002\nEmitente: COMERCIO EXEMPLO SA CNPJ 22.233.344/0001-83\nDestinatario: CLIENTE EXEMPLO CNPJ 55.566.677/0001-83\nData de Emissao: 01/12/2023\nValor Total dos Produtos: R$ 3.200,00\n",
+      "tables": [
+        {
+          "table_id": 0,
+          "bbox": [0, 0, 0, 0],
+          "n_rows": 4,
+          "n_cols": 5,
+          "rows": [
+            ["Codigo", "Descricao", "Qtd", "Valor Unitario", "Valor Total"],
+            ["001", "Item Um", "1", "1.000,00", "1.000,00"],
+            ["002", "Item Dois", "2", "800,00", "1.600,00"],
+            ["003", "Item Tres", "4", "150,00", "600,00"]
+          ]
+        }
+      ]
+    }
+  ]
+}

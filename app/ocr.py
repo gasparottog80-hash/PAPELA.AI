@@ -8,9 +8,11 @@ from .tables import parse_table_html
 logger = logging.getLogger("papela.ocr")
 
 # Result schema version. v2 adds per-page `tables` (structured rows + source
-# HTML) alongside the v1 `text`/`confidence`. Bump when the shape changes so
+# HTML) alongside the v1 `text`/`confidence`. v3 adds a top-level `fields`
+# object (deterministic fiscal extraction, added by the worker AFTER OCR — the
+# engines still emit only the OCR payload). Bump when the shape changes so
 # stored results in Postgres can be migrated/interpreted deterministically.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Deterministic sample table used by the fake engine so the full structured
 # pipeline (parse -> worker -> Postgres JSONB -> API) is exercised without
