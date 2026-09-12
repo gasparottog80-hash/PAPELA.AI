@@ -19,6 +19,10 @@ class JsonFormatter(logging.Formatter):
         request_id = getattr(record, "request_id", None)
         if request_id is not None:
             payload["request_id"] = request_id
+        # Sanitized error category (never the raw exception text — LGPD).
+        error = getattr(record, "error", None)
+        if error is not None:
+            payload["error"] = error
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)

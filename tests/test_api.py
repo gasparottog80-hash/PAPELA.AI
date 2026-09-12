@@ -15,6 +15,9 @@ os.environ.setdefault(
 os.environ.setdefault("PAPELA_API_KEYS", "test-key")
 os.environ.setdefault("PAPELA_OCR_ENGINE", "fake")
 os.environ.setdefault("PAPELA_STORAGE_DIR", "./data/test-uploads")
+# Tests opt OUT of purge-after-done so retention/audit paths can inspect the
+# file; the dedicated purge test re-enables it via Settings.model_copy.
+os.environ.setdefault("PAPELA_PURGE_AFTER_DONE", "false")
 
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -152,3 +155,79 @@ def test_retention_sweep_purges_expired_only(client: TestClient):
     assert pdf_exists(job_id, s.storage_dir) is False
     # Idempotent: a second sweep finds nothing (purged_at already set).
     assert purge_expired_jobs(repo, s.storage_dir, retention_days=0) == 0
+
+
+def _insert_stalled_job(job_id: str, *, attempts: int, age_seconds: int) -> None:
+    """Simulate a worker that claimed a job then crashed: status=processing
+    with an old updated_at."""
+    with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO jobs (id, status, filename, storage_path, size_bytes,
+                              pages, attempts, created_at, updated_at)
+            VALUES (%s, 'processing', 'stalled.pdf', '/nonexistent.pdf', 1, 1, %s,
+                    now() - make_interval(secs => %s),
+                    now() - make_interval(secs => %s))
+            """,
+            (job_id, attempts, age_seconds, age_seconds),
+        )
+
+
+def test_reaper_requeues_stalled_job(client: TestClient):
+    # FIX 1: a job stuck in 'processing' past the stall timeout must be
+    # requeued so another worker can retry it (crash recovery).
+    import uuid
+
+    job_id = str(uuid.uuid4())
+    _insert_stalled_job(job_id, attempts=1, age_seconds=600)
+    repo = JobRepository(app.state.db.pool)
+
+    reaped = repo.reap_stalled_jobs(stall_timeout_s=300, max_attempts=3)
+    assert reaped == 1
+    assert client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["status"] == "pending"
+
+
+def test_reaper_fails_stalled_job_when_attempts_exhausted(client: TestClient):
+    # CRITICAL EDGE: a stalled job that already used all attempts must go to
+    # 'failed', not loop forever.
+    import uuid
+
+    job_id = str(uuid.uuid4())
+    _insert_stalled_job(job_id, attempts=3, age_seconds=600)
+    repo = JobRepository(app.state.db.pool)
+
+    assert repo.reap_stalled_jobs(stall_timeout_s=300, max_attempts=3) == 1
+    body = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+    assert body["status"] == "failed"
+    # Reaper error text is a safe category, never document content.
+    assert body["error"] == "processing_error: StalledJobReaped"
+
+
+def test_reaper_leaves_fresh_processing_job(client: TestClient):
+    # A job just claimed (fresh updated_at) must NOT be reaped.
+    import uuid
+
+    job_id = str(uuid.uuid4())
+    _insert_stalled_job(job_id, attempts=1, age_seconds=5)
+    repo = JobRepository(app.state.db.pool)
+
+    assert repo.reap_stalled_jobs(stall_timeout_s=300, max_attempts=3) == 0
+    assert (
+        client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["status"] == "processing"
+    )
+
+
+def test_result_persisted_before_purge_is_crash_safe(client: TestClient):
+    # FIX 1 ordering: after processing with purge on, the job is 'done' with a
+    # result AND the file is gone. The result must exist even though the PDF
+    # was purged (mark_done runs before delete_pdf).
+    s = get_settings()
+    job_id = _upload(client)
+    repo = JobRepository(app.state.db.pool)
+    engine = build_engine(s.ocr_engine, s.ocr_lang)
+    process_one(repo, engine, s.model_copy(update={"purge_after_done": True}))
+
+    body = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+    assert body["status"] == "done"
+    assert body["result"]["page_count"] == 1  # result survived the purge
+    assert pdf_exists(job_id, s.storage_dir) is False

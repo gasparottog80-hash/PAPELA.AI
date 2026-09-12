@@ -48,8 +48,9 @@ services:
     command: ["python", "-m", "app.worker"]
     environment:
       <<: *app-env
-      # In prod the worker purges the raw PDF right after a successful OCR.
-      PAPELA_PURGE_AFTER_DONE: ${PAPELA_PURGE_AFTER_DONE:-false}
+      # purge-after-done is ON by default (see app/config.py). To KEEP raw PDFs
+      # on disk (dev/inspection only) set PAPELA_PURGE_AFTER_DONE=false.
+      PAPELA_PURGE_AFTER_DONE: ${PAPELA_PURGE_AFTER_DONE:-true}
     depends_on:
       postgres:
         condition: service_healthy

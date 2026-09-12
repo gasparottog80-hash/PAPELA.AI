@@ -126,6 +126,30 @@ class JobRepository:
                 (job_id,),
             )
 
+    def reap_stalled_jobs(self, *, stall_timeout_s: int, max_attempts: int) -> int:
+        """Recover jobs stuck in 'processing' (worker crashed between claim and
+        mark_done/failed). Jobs whose updated_at is older than the timeout go
+        back to 'pending' for retry, or to 'failed' once attempts are exhausted.
+
+        Returns the number of jobs reaped. Runs in a single UPDATE so it is
+        safe to call from multiple workers concurrently.
+        """
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE jobs
+                SET status = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END,
+                    error = CASE WHEN attempts >= %s
+                                 THEN 'processing_error: StalledJobReaped'
+                                 ELSE error END,
+                    updated_at = now()
+                WHERE status = 'processing'
+                  AND updated_at < now() - make_interval(secs => %s)
+                """,
+                (max_attempts, max_attempts, stall_timeout_s),
+            )
+            return cur.rowcount
+
     def mark_failed(self, job_id: str, error: str, *, max_attempts: int) -> None:
         """Failed -> back to pending for retry until attempts exhausted."""
         with self._pool.connection() as conn:

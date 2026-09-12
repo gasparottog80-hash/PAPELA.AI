@@ -42,24 +42,23 @@ class Settings(BaseSettings):
     max_attempts: int = 3
 
     # --- LGPD retention / minimization ---
-    # Delete the raw PDF from disk right after a successful OCR (data
-    # minimization). None => on in production, off in dev. Explicit wins.
-    purge_after_done: bool | None = None
+    # Delete the raw PDF from disk right after a successful OCR. Fail-safe
+    # default is ON: a product handling sensitive fiscal documents must never
+    # leave them on disk by accident. Opt OUT explicitly
+    # (PAPELA_PURGE_AFTER_DONE=false) only in dev when you must inspect the file.
+    purge_after_done: bool = True
     # Retention for done jobs' raw PDFs; the periodic sweep deletes files
     # older than this. The extracted JSON in Postgres is NOT deleted here.
     retention_days: int = 7
-    # How often the worker runs the retention sweep.
+    # How often the worker runs the retention sweep + stalled-job reaper.
     purge_interval_s: int = 3600
+    # A job stuck in 'processing' longer than this (worker crashed between
+    # claim and mark_done/failed) is requeued (or failed) by the reaper.
+    stall_timeout_s: int = 300
 
     @property
     def api_key_set(self) -> frozenset[str]:
         return frozenset(k.strip() for k in self.api_keys.split(",") if k.strip())
-
-    @property
-    def should_purge_after_done(self) -> bool:
-        if self.purge_after_done is not None:
-            return self.purge_after_done
-        return self.env == "production"
 
 
 @lru_cache
