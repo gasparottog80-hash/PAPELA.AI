@@ -34,12 +34,21 @@ without `PAPELA_API_KEYS` set. Rate limit: per-key fixed window (in-process).
 
 The raw PDF is the sensitive artifact; the pipeline minimizes its lifetime on disk.
 
-- Data minimization (`PAPELA_PURGE_AFTER_DONE=true`, default in production): the
-  worker deletes the raw PDF from disk in the SAME step it persists the extracted
-  text, so a `done` job never leaves a sensitive file sitting on disk.
+- Data minimization (`PAPELA_PURGE_AFTER_DONE`, fail-safe default `true`): the
+  worker persists the extracted text and then deletes the raw PDF from disk, so a
+  `done` job leaves no sensitive file behind. Set to `false` only in dev when you
+  must inspect the stored file.
+- Crash safety: the result is written (`mark_done`) BEFORE the PDF is deleted, so
+  a crash can at worst orphan a PDF (reclaimed by the retention sweep) — never
+  purge a file with no persisted result.
 - Retention sweep: every `PAPELA_PURGE_INTERVAL_S` (default 1h) the worker deletes
-  raw PDFs of `done` jobs older than `PAPELA_RETENTION_DAYS` (default 7). This is
-  the belt-and-suspenders path even when purge-after-done is off.
+  raw PDFs of `done` jobs older than `PAPELA_RETENTION_DAYS` (default 7).
+- Crash recovery (reaper): jobs stuck in `processing` past `PAPELA_STALL_TIMEOUT_S`
+  (default 300s) — a worker that died mid-job — are requeued for retry, or failed
+  once `max_attempts` is reached. Runs in the same maintenance loop as the sweep.
+- PII-safe errors: OCR/parse exceptions can embed document content, so the stored
+  `error` column and logs contain only an allow-listed category + exception class
+  name (see `app/sanitize.py`), never the raw exception message.
 - Auditability: every deletion emits a structured log line (`pdf.deleted`, with
   job_id + reason) and stamps `jobs.purged_at`. `GET /v1/jobs/{id}/audit`
   cross-checks the DB stamp against the actual filesystem.
@@ -51,9 +60,10 @@ The raw PDF is the sensitive artifact; the pipeline minimizes its lifetime on di
 
 Relevant env vars (see `.env.example`):
 
-    PAPELA_PURGE_AFTER_DONE   true|false   delete raw PDF right after OCR
+    PAPELA_PURGE_AFTER_DONE   true|false   delete raw PDF right after OCR (default true)
     PAPELA_RETENTION_DAYS     int (7)      max age of raw PDFs on disk
-    PAPELA_PURGE_INTERVAL_S   int (3600)   retention sweep period
+    PAPELA_PURGE_INTERVAL_S   int (3600)   maintenance loop period (sweep + reaper)
+    PAPELA_STALL_TIMEOUT_S    int (300)    requeue jobs stuck in 'processing' this long
 
 ## Run (Docker, all 3 services)
 
