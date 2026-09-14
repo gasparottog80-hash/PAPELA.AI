@@ -12,6 +12,11 @@ dependencies = [
     "psycopg-pool>=3.2",
     "pypdf>=5.1",
     "python-multipart>=0.0.12",
+    # Proprietary fiscal-field extraction core. Private, not on PyPI. PEP 508
+    # direct Git reference (not [tool.uv.sources]) so plain `pip install .`
+    # resolves it too, not just `uv`. Pinned to an immutable tag — never a
+    # branch. Not part of this repository (see README).
+    "papela-fiscal-extractor @ git+ssh://git@github.com/gasparottog80-hash/papela-fiscal-extractor.git@v0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -39,3 +44,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+# Required because `dependencies` above includes a PEP 508 direct reference
+# (the private Git dependency). Hatchling refuses to build otherwise, to stop
+# a package with direct references from being accidentally published to
+# PyPI. papela-ai is an application, never published to PyPI, so this is safe.
+[tool.hatch.metadata]
+allow-direct-references = true

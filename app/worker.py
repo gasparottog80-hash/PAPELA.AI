@@ -5,9 +5,10 @@ import signal
 import time
 from types import FrameType
 
+from papela_fiscal_extractor import extract_fields
+
 from .config import Settings, get_settings
 from .db import Database
-from .extract import extract_fields
 from .ocr import OcrEngine, build_engine
 from .repository import JobRepository
 from .sanitize import sanitize_error

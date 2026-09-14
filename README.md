@@ -91,28 +91,23 @@ Relevant env vars (see `.env.example`):
     docker compose up -d postgres --wait
     uv run pytest                          # skips gracefully if Postgres unreachable
 
-## Fiscal field extraction (deterministic)
+## Fiscal field extraction (proprietary, private dependency)
 
-After OCR, the worker runs `app/extract.py` over the OCR payload (text +
-structured tables) and attaches `result["fields"]`. 100% deterministic —
-regex + heuristics + check-digit validation, no LLM, no external calls (LGPD:
-runs on the already-local result). It never raises: any sub-extractor failure
-degrades to null/empty and is logged without document content.
+After OCR, the worker calls `papela_fiscal_extractor.extract_fields(...)` over
+the OCR payload and attaches the result to `result["fields"]` (schema v3).
+100% deterministic — no LLM, no external network calls (LGPD: runs entirely
+on the already-local OCR result). It never raises: any internal failure
+degrades to null/empty per field and is logged without document content.
 
-Fields (schema v3, `result.fields`):
+**This extraction core is proprietary and lives outside this repository.**
+The exact fields, rules and heuristics are part of PAPELA.AI's commercial
+differentiator and are intentionally not documented here. The JSON shape
+`result["fields"]` produces is exercised end-to-end in `tests/test_api.py`.
 
-- `emitente_cnpj` / `destinatario_cnpj` — `{value, digits, valid, role,
-  role_source}`. `valid` is the mod-11 check-digit result (kills most regex
-  false positives). `role_source` is `label` (from an explicit
-  Emitente/Destinatário keyword) or `position` (two-unlabeled-CNPJ fallback).
-- `cnpjs` / `cpfs` — every distinct document found, each check-digit validated.
-- `numero_nf` — NF number; boundary-guarded so it never grabs a slice of the
-  44-digit NFe access key.
-- `data_emissao` — ISO date, label-anchored with a first-date fallback.
-- `valor_total` — pt-BR money parsed to a `"1590.00"` string (exact, no float).
-- `itens` — line items from structured tables: `{descricao, quantidade,
-  valor_unitario, valor_total, codigo, raw}` (columns mapped from the header;
-  money as strings). Unmappable tables are skipped, not turned into garbage.
+**Development note:** this repository does not build or run the worker
+without `papela-fiscal-extractor` available as a local dependency (see
+`pyproject.toml`'s `[tool.uv.sources]`). There is no public fallback/stub
+implementation by design.
 
 ## Scope / next steps
 
