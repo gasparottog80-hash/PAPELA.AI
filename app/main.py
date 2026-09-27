@@ -63,7 +63,9 @@ async def request_id_middleware(request: Request, call_next):
         logger.exception("unhandled", extra={"request_id": request_id})
         return JSONResponse(
             status_code=500,
-            content=ErrorResponse(request_id=request_id, error="internal error").model_dump(),
+            content=ErrorResponse(
+                request_id=request_id, error="internal error"
+            ).model_dump(),
         )
     response.headers["x-request-id"] = request_id
     return response

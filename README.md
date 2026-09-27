@@ -68,8 +68,9 @@ Relevant env vars (see `.env.example`):
 ## Run (Docker, all 3 services)
 
     # api on host :8077, postgres on host :5433, worker in background
+    docker compose build --ssh default
     PAPELA_ENV=production PAPELA_API_KEYS=change-me PAPELA_PURGE_AFTER_DONE=true \
-      docker compose up -d --build
+      docker compose up -d
 
     curl -s -X POST http://localhost:8077/v1/upload \
       -H "X-API-Key: change-me" -F "file=@nota.pdf;type=application/pdf"
@@ -80,8 +81,8 @@ Relevant env vars (see `.env.example`):
     cp .env.example .env
     docker compose up -d postgres --wait   # just Postgres (host :5433)
     uv venv --python 3.11
-    uv pip install -e ".[dev]"             # API/worker/tests (fake OCR)
-    # uv pip install -e ".[dev,ocr]"       # + real PaddleOCR runtime
+    uv sync --locked --extra dev          # API/worker/tests (fake OCR)
+    # uv sync --locked --extra dev --extra ocr  # + real PaddleOCR runtime
 
     uv run uvicorn app.main:app --reload           # API
     uv run python -m app.worker                    # worker (separate process)
@@ -90,6 +91,38 @@ Relevant env vars (see `.env.example`):
 
     docker compose up -d postgres --wait
     uv run pytest                          # skips gracefully if Postgres unreachable
+
+## Quality checks
+
+    uv lock --check
+    uv sync --locked --extra dev
+    uv run --locked --extra dev ruff check .
+    uv run --locked --extra dev mypy app
+    uv run --locked --extra dev pytest
+    uv build
+    uv run --locked --extra dev python scripts/verify_extractor.py
+
+The checks above are the local Gate 1 baseline. The Docker image requires SSH
+forwarding only while resolving the private extractor during the build:
+
+    docker compose build --ssh default
+
+Docker installs with `uv sync --locked --no-dev --no-editable`: a missing or
+inconsistent lockfile fails the build. SSH is forwarded only into the builder;
+the runtime receives the installed environment, lockfile and provenance check,
+without SSH tools or the Git checkout cache. Runtime Python uses `/app/.venv`.
+
+For a fresh reproducibility check:
+
+    docker build --no-cache --pull --ssh default -t papelaai-gate1 .
+    docker run --rm --network none papelaai-gate1 python scripts/verify_extractor.py
+
+`v0.1.0` is an annotated tag: `2746d39c395d2c09849f938a4cee0fc4d8208358`
+is its tag-object SHA; its peeled commit is
+`ddb485ff76627f2e995b11d2b4d11325fc5628c9`, the commit pinned in `uv.lock`.
+The two hashes describe different Git object types, not different code revisions.
+The remote tag and peeled commit matched these values during revalidation.
+No tag or private extractor source was changed.
 
 ## Fiscal field extraction (proprietary, private dependency)
 
@@ -106,7 +139,7 @@ differentiator and are intentionally not documented here. The JSON shape
 
 **Development note:** this repository does not build or run the worker
 without `papela-fiscal-extractor` available as a local dependency (see
-`pyproject.toml`'s `[tool.uv.sources]`). There is no public fallback/stub
+`pyproject.toml`'s direct Git dependency and `uv.lock`). There is no public fallback/stub
 implementation by design.
 
 ## Scope / next steps

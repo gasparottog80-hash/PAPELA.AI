@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -40,7 +40,7 @@ class JobRepository:
             )
         return job_id
 
-    def get(self, job_id: str) -> Optional[dict[str, Any]]:
+    def get(self, job_id: str) -> dict[str, Any] | None:
         with self._pool.connection() as conn:
             cur = conn.cursor(row_factory=dict_row)
             cur.execute(
@@ -53,7 +53,7 @@ class JobRepository:
             )
             return cur.fetchone()
 
-    def claim_next(self) -> Optional[dict[str, Any]]:
+    def claim_next(self) -> dict[str, Any] | None:
         """Atomically claim one pending job. Returns None if queue empty."""
         with self._pool.connection() as conn:
             with conn.transaction():

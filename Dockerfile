@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1
 # Single image shared by api + worker. Fake OCR by default; add the `ocr`
 # extra + system libs when wiring real PaddleOCR (see comment below).
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e AS base
+
+FROM base AS builder
+
+# Match the local validation tool; dependency versions come from uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.10.12@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec /uv /usr/local/bin/uv
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # git + openssh-client: needed to resolve the private papela-fiscal-extractor
-# Git dependency during `pip install .` below.
+# Git dependency during the locked sync below (builder only).
 RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,14 +34,32 @@ github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+V
 EOF
 
 # For real PaddleOCR add: libgl1 libglib2.0-0 (OpenCV runtime) and install
-# ".[ocr]". Kept out of the default image to stay slim.
-COPY pyproject.toml README.md ./
+# `--extra ocr` to uv sync. Kept out of the default image to stay slim.
+COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
+COPY scripts/verify_extractor.py ./scripts/verify_extractor.py
 
 # --mount=type=ssh forwards the host's SSH agent for this step only — the
 # private key is never written to any layer or to the final image. Requires
 # `docker build --ssh default` (see README).
-RUN --mount=type=ssh pip install --upgrade pip && pip install .
+# --locked validates manifest consistency and refuses lockfile updates.
+# The temporary cache (including the Git checkout) never becomes a layer.
+RUN --mount=type=ssh,required=true \
+    --mount=type=tmpfs,target=/root/.cache/uv \
+    GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts -o GlobalKnownHostsFile=/dev/null" \
+    UV_PYTHON_DOWNLOADS=never uv sync --locked --no-dev --no-editable --link-mode=copy \
+    && .venv/bin/python scripts/verify_extractor.py
+
+FROM base AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/uv.lock /app/uv.lock
+COPY --from=builder /app/scripts/verify_extractor.py /app/scripts/verify_extractor.py
 
 # Non-root: the app never needs root, and the PDF volume is chown'd to it.
 RUN useradd --create-home --uid 10001 appuser \

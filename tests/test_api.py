@@ -19,7 +19,7 @@ os.environ.setdefault("PAPELA_STORAGE_DIR", "./data/test-uploads")
 # file; the dedicated purge test re-enables it via Settings.model_copy.
 os.environ.setdefault("PAPELA_PURGE_AFTER_DONE", "false")
 
-from app.config import Settings, get_settings  # noqa: E402
+from app.config import get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ocr import build_engine  # noqa: E402
 from app.repository import JobRepository  # noqa: E402
@@ -122,7 +122,13 @@ def test_upload_rejects_non_pdf(client: TestClient):
     r = client.post(
         "/v1/upload",
         headers=AUTH,
-        files={"file": ("evil.pdf", io.BytesIO(b"GIF89a not a pdf"), "application/pdf")},
+        files={
+            "file": (
+                "evil.pdf",
+                io.BytesIO(b"GIF89a not a pdf"),
+                "application/pdf",
+            )
+        },
     )
     assert r.status_code == 400
     assert "PDF" in r.json()["error"]

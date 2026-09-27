@@ -1,0 +1,59 @@
+# Isolated synthetic-data environment. Never connects to the normal Compose DB.
+# Start postgres alone for pytest; start api/worker only after pytest finishes.
+name: papela-gate1-revalidation
+
+x-test-env: &test-env
+  PAPELA_DATABASE_URL: postgresql://gate1:gate1-test-only@postgres:5432/gate1
+  PAPELA_API_KEYS: gate1-synthetic-test-key
+  PAPELA_ENV: test
+  PAPELA_OCR_ENGINE: fake
+  PAPELA_STORAGE_DIR: /data/pdfs
+  PAPELA_PURGE_AFTER_DONE: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gate1
+      POSTGRES_PASSWORD: gate1-test-only
+      POSTGRES_DB: gate1
+    ports:
+      - "127.0.0.1:55433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gate1 -d gate1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: papelaai-gate1-revalidated
+    pull_policy: never
+    environment: *test-env
+    ports:
+      - "127.0.0.1:18077:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - gate1_pdfs:/data/pdfs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    image: papelaai-gate1-revalidated
+    pull_policy: never
+    command: ["python", "-m", "app.worker"]
+    environment: *test-env
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - gate1_pdfs:/data/pdfs
+
+volumes:
+  gate1_pdfs:

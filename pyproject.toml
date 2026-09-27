@@ -14,8 +14,9 @@ dependencies = [
     "python-multipart>=0.0.12",
     # Proprietary fiscal-field extraction core. Private, not on PyPI. PEP 508
     # direct Git reference (not [tool.uv.sources]) so plain `pip install .`
-    # resolves it too, not just `uv`. Pinned to an immutable tag — never a
-    # branch. Not part of this repository (see README).
+    # resolves it too, not just `uv`. The release tag is annotated; uv.lock
+    # pins its peeled commit. Use uv sync --locked for reproducible installs.
+    # Not part of this repository (see README).
     "papela-fiscal-extractor @ git+ssh://git@github.com/gasparottog80-hash/papela-fiscal-extractor.git@v0.1.0",
 ]
 
@@ -23,6 +24,8 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "httpx>=0.27",
+    "mypy>=1.13",
+    "ruff>=0.8",
 ]
 # Heavy OCR runtime deps, installed only where the worker actually runs OCR.
 # Pinned to the PaddleOCR 2.x line: PPStructure API + numpy<2 (paddle 2.x is
@@ -37,6 +40,29 @@ ocr = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+extend-exclude = ["graphify-out"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["app"]
+check_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+exclude = "graphify-out"
+
+[[tool.mypy.overrides]]
+module = ["fitz", "numpy", "paddleocr", "papela_fiscal_extractor"]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["hatchling"]

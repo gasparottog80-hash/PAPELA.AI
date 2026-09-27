@@ -17,7 +17,10 @@ _CATEGORIES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"timeout|timed out|deadline"), "ocr_timeout"),
     (re.compile(r"memory|oom|cannot allocate"), "resource_exhausted"),
     (re.compile(r"no such file|not found|no pages|empty"), "pdf_unreadable"),
-    (re.compile(r"connection|refused|reset|unreachable|pool"), "dependency_unavailable"),
+    (
+        re.compile(r"connection|refused|reset|unreachable|pool"),
+        "dependency_unavailable",
+    ),
 ]
 
 

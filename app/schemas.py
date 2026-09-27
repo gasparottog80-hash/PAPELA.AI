@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -16,13 +16,13 @@ class JobStatus(BaseModel):
     id: str
     status: str
     filename: str
-    pages: Optional[int] = None
-    result: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
+    pages: int | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
     attempts: int
     created_at: datetime
     updated_at: datetime
-    purged_at: Optional[datetime] = None
+    purged_at: datetime | None = None
 
 
 class ErrorResponse(BaseModel):

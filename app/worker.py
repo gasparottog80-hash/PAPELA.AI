@@ -61,7 +61,9 @@ def process_one(repo: JobRepository, engine: OcrEngine, settings: Settings) -> b
             "job.failed",
             extra={"request_id": job_id, "error": sanitize_error(exc)},
         )
-        repo.mark_failed(job_id, sanitize_error(exc), max_attempts=settings.max_attempts)
+        repo.mark_failed(
+            job_id, sanitize_error(exc), max_attempts=settings.max_attempts
+        )
     return True
 
 
@@ -106,7 +108,9 @@ def run() -> None:
                     if n:
                         logger.info("retention.purged", extra={"request_id": None})
                 except Exception:  # noqa: BLE001 - sweep must never kill worker
-                    logger.exception("retention.sweep_failed", extra={"request_id": None})
+                    logger.exception(
+                        "retention.sweep_failed", extra={"request_id": None}
+                    )
                 last_sweep = now
 
             did_work = process_one(repo, engine, settings)
