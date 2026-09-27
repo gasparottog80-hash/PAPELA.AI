@@ -1,0 +1,140 @@
+name: Reproducible baseline
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: baseline-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_CACHE: '1'
+      PAPELA_ENV: test
+      PAPELA_DATABASE_URL: postgresql://gate1:gate1-test-only@127.0.0.1:55433/gate1
+      PAPELA_API_KEYS: test-key
+      PAPELA_OCR_ENGINE: fake
+      PAPELA_STORAGE_DIR: ./data/ci-uploads
+      PAPELA_PURGE_AFTER_DONE: 'false'
+    steps:
+      # Do not replace this with pull_request_target to expose private source.
+      - name: Require a trusted repository event
+        env:
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [[ "$IS_FORK" == "true" || "$ACTOR" == "dependabot[bot]" ]]; then
+            echo '::error::Private baseline cannot run on fork or Dependabot PRs. Maintainer review is required.'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.12'
+          enable-cache: false
+
+      - name: Load exclusive read-only extractor key into an ephemeral agent
+        env:
+          CI_DEPLOY_KEY: ${{ secrets.PAPELA_EXTRACTOR_CI_SSH_KEY }}
+        run: |
+          if [[ -z "$CI_DEPLOY_KEY" ]]; then
+            echo '::error::Configure PAPELA_EXTRACTOR_CI_SSH_KEY with the exclusive read-only deploy key. No fallback key is allowed.'
+            exit 1
+          fi
+          actual=$(ssh-keygen -lf .github/ssh_known_hosts -E sha256 | awk '{print $2}')
+          [[ "$actual" == 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' ]]
+          eval "$(ssh-agent -a "$RUNNER_TEMP/papela-ci-agent.sock" -s)" >/dev/null
+          # Publish coordinates before ssh-add so failure still triggers cleanup.
+          printf 'SSH_AUTH_SOCK=%s\nSSH_AGENT_PID=%s\n' "$SSH_AUTH_SOCK" "$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          printf '%s\n' "$CI_DEPLOY_KEY" | ssh-add -t 1800 - >/dev/null 2>&1
+          # Validate the dedicated v2 identity, not a personal/compromised key.
+          [[ "$(ssh-add -l -E sha256 | awk '{print $2}')" == 'SHA256:SwxgjtF6Mzjf2/Bh7/5EfJmMR5Xiu8XlwYSRqnaUx7U' ]]
+          printf 'GIT_SSH_COMMAND=ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=%s/.github/ssh_known_hosts -o GlobalKnownHostsFile=/dev/null\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Validate lock and install locked dependencies
+        run: |
+          uv lock --check
+          uv sync --locked --extra dev
+          uv run --no-sync python scripts/verify_extractor.py
+
+      - name: Fresh Docker build with BuildKit SSH forwarding
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" --tag papelaai-gate1-revalidated .
+          docker run --rm --network none papelaai-gate1-revalidated python scripts/verify_extractor.py
+
+      - name: Remove automation key from agent
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${SSH_AGENT_PID:-}" ]]; then
+            ssh-add -D >/dev/null 2>&1 || true
+            ssh-agent -k >/dev/null
+          fi
+
+      # No agent credential remains while test/application scripts execute.
+      - name: Lint and typecheck
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync mypy app
+
+      - name: Validate Compose and start isolated test database
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.gate1.yml config --quiet
+          docker compose -f compose.gate1.yml up --detach --wait --wait-timeout 90 postgres
+          uv run --no-sync python -c 'import os, psycopg; psycopg.connect(os.environ["PAPELA_DATABASE_URL"], connect_timeout=5).close()'
+
+      - name: Unit and integration tests (no skipped tests allowed)
+        run: |
+          uv run --no-sync pytest --junitxml="$RUNNER_TEMP/pytest.xml"
+          uv run --no-sync python - "$RUNNER_TEMP/pytest.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = list(root.iter('testcase'))
+          assert cases, 'No tests executed'
+          assert not list(root.iter('skipped')), 'Skipped tests invalidate the baseline'
+          assert not list(root.iter('failure')), 'Test failures invalidate the baseline'
+          assert not list(root.iter('error')), 'Test errors invalidate the baseline'
+          print(f'Test report PASS: {len(cases)} tests, zero skips/errors/failures')
+          PY
+
+      - name: Build application distributions
+        run: uv build
+
+      - name: Smoke E2E against the freshly built API and worker
+        run: |
+          docker compose -f compose.gate1.yml up --detach --wait --wait-timeout 90 api worker
+          uv run --no-sync python scripts/smoke_ci.py
+          git diff --exit-code -- pyproject.toml uv.lock
+          git diff --check
+
+      - name: Remove isolated test containers and synthetic data
+        if: ${{ always() }}
+        run: |
+          if [[ -f compose.gate1.yml ]]; then
+            docker compose -f compose.gate1.yml down --volumes --remove-orphans
+          fi
+
+      # No artifact/image upload: installed runtime contains proprietary IP.
