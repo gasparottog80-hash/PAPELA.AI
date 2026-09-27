@@ -1,8 +1,9 @@
 # Gate 2 — secure CI foundation
 
-Status at CI publication: **awaiting real GitHub Actions execution**. The v2
-read-only Deploy Key is configured, and the repository secret's existence was
-verified in GitHub. A YAML file or local validation is not Gate 2 PASS.
+Status: **PASS — CI foundation**, backed by actual GitHub Actions execution.
+See [execution evidence](gate2-validation.md). The v2 read-only Deploy Key is
+configured, and the repository secret's existence was verified without reading
+its value. This is not production deployment or a production go-live approval.
 
 ## Credential rotation — 2026-09-27
 
@@ -133,6 +134,8 @@ Official references:
 Inspect an actual `push` run on `master`. Record its URL, source SHA, all checks
 and both extractor
 commit outputs. Diagnose failures without disabling checks/changing the extractor
-reference. Verify secret/IP hygiene in logs/artifacts and test a trusted
-same-repository PR run. Gate 2 is PASS only with actual successful execution;
+reference. Verify secret/IP hygiene in logs/artifacts. A trusted same-repository
+PR run is an additional follow-up; its trigger is configured, but was not
+separately exercised in this validation. Gate 2 is PASS only with actual
+successful execution;
 otherwise report FAIL/BLOCKED and its cause.
