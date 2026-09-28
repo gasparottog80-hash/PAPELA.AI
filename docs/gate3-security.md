@@ -102,6 +102,21 @@ secret findings**. The runtime does not contain importable pip, setuptools or
 wheel. Image digest:
 `sha256:e97a5c9f0b0aa6be08beaf89468bd068106167aa67e5f37cc6852e4cf1b5923a`.
 
+Remaining OS findings (Trivy severity HIGH; no Trixie fixed version returned):
+
+| Source package / installed version | CVEs | Context / mitigation status |
+| --- | --- | --- |
+| util-linux / 2.41.5-0+deb13u1 | CVE-2026-76642, CVE-2026-78408, CVE-2026-78409, CVE-2026-78410 | Privileged mount/nsenter paths; non-root, capability drop and no-new-privileges reduce exposure; complete reachability triage still pending |
+| systemd / 257.13-1~deb13u1 | CVE-2026-16742 | systemd-homed privileged local path; not running in this image; retain finding until absence/prerequisites are recorded conclusively |
+| acl / 2.3.2-2+b1 | CVE-2026-54369 | Privileged ACL path handling; no application ACL call found, but mitigation is not yet certified |
+| ncurses / 6.5+20250216-2 | CVE-2025-69720 | No application terminal/parser call found; affected utility reachability remains under triage |
+| perl / 5.40.1-6+deb13u1 | CVE-2026-9538 | No app-controlled Perl execution; vendor fix/complete mitigation remains pending |
+
+Versions above group the installed binary packages by source family; multiple
+binary packages account for the 44 occurrences. Check the
+[Debian security tracker](https://security-tracker.debian.org/tracker/) and the
+individual advisory prerequisites before accepting any mitigation.
+
 Gitleaks scanned 11 recent commits and the working directory. Its one finding
 in each scan points to the same **documented example API key** in `README.md`
 (current and historical lines). The value was verified to match a local
@@ -147,8 +162,25 @@ modules); pytest **67 passed, 0 failed, 0 skipped** (two pre-existing
 deprecation warnings); `uv build` PASS; both Compose configs PASS; fresh
 Docker build and private-commit checker PASS; smoke E2E and negative HTTP
 smoke PASS. The Linux image is not published. GitHub Actions must be checked
-again after this change is pushed; a successful CI job does not override the
+again whenever the code changes; a successful CI job does not override the
 residual HIGH findings above.
+
+## Published commit and real CI evidence
+
+Code commit: `a4fb051bd4226e90df60ab5c5ffec4215cd876fd` —
+`security: harden API uploads and worker boundaries`.
+
+[GitHub Actions run 36364679629](https://github.com/gasparottog80-hash/PAPELA.AI/actions/runs/36364679629)
+completed with `success` for that exact commit at 2026-09-28 01:07:17 UTC.
+Job `baseline` (108748624316) completed all 19 recorded steps successfully:
+locked install, ephemeral CI-key loading/removal, fresh Docker build, lint,
+typecheck, test report with no skipped cases, application build, Compose,
+both smoke scripts and disposable-data cleanup. No runtime image or private
+source artifact was published. The local disposable stack was also removed;
+normal application containers/data were not touched.
+
+Status remains **BLOCKED** because CI success does not resolve the residual
+HIGH findings or authorize production deployment.
 
 This report records a partial security improvement with unresolved findings;
 it is not a go-live approval.
