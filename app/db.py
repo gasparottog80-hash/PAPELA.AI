@@ -42,19 +42,63 @@ CREATE INDEX IF NOT EXISTS idx_jobs_purge
 
 class Database:
     def __init__(self, settings: Settings) -> None:
+        self._production = settings.env == "production"
         self._pool = ConnectionPool(
             conninfo=settings.database_url,
             min_size=settings.db_pool_min,
             max_size=settings.db_pool_max,
             open=False,
-            kwargs={"autocommit": True},
+            kwargs={
+                "autocommit": True,
+                "connect_timeout": 5,
+                "options": "-c statement_timeout=10000 -c lock_timeout=5000",
+            },
         )
 
     def open(self) -> None:
         self._pool.open()
-        self._pool.wait(timeout=10.0)
-        with self._pool.connection() as conn:
-            conn.execute(SCHEMA_SQL)
+        try:
+            self._pool.wait(timeout=10.0)
+            with self._pool.connection() as conn:
+                if self._production:
+                    # Schema is applied separately by its owner. Runtime must
+                    # not own/alter schema, create roles/DBs, or bypass RLS.
+                    flags = conn.execute(
+                        "SELECT rolsuper OR rolcreaterole OR rolcreatedb "
+                        "OR rolbypassrls "
+                        "FROM pg_roles WHERE rolname = current_user"
+                    ).fetchone()
+                    owner = conn.execute(
+                        "SELECT tableowner FROM pg_tables "
+                        "WHERE schemaname = 'public' AND tablename = 'jobs'"
+                    ).fetchone()
+                    can_create = conn.execute(
+                        "SELECT has_schema_privilege(current_user, 'public', 'CREATE')"
+                    ).fetchone()
+                    owner_membership = (
+                        conn.execute(
+                            "SELECT pg_has_role(current_user, %s, 'MEMBER')",
+                            (owner[0],),
+                        ).fetchone()
+                        if owner else None
+                    )
+                    if (
+                        not flags
+                        or flags[0]
+                        or not owner
+                        or not can_create
+                        or can_create[0]
+                        or not owner_membership
+                        or owner_membership[0]
+                    ):
+                        raise RuntimeError(
+                            "Production requires provisioned least-privilege DB role"
+                        )
+                else:
+                    conn.execute(SCHEMA_SQL)
+        except Exception:
+            self._pool.close()
+            raise
         logger.info("db.ready", extra={"request_id": None})
 
     def close(self) -> None:

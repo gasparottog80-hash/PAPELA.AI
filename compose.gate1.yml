@@ -29,6 +29,10 @@ services:
 
   api:
     image: papelaai-gate1-revalidated
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     pull_policy: never
     environment: *test-env
     ports:
@@ -46,6 +50,10 @@ services:
 
   worker:
     image: papelaai-gate1-revalidated
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     pull_policy: never
     command: ["python", "-m", "app.worker"]
     environment: *test-env

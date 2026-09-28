@@ -20,8 +20,8 @@ os.environ.setdefault("PAPELA_STORAGE_DIR", "./data/test-uploads")
 os.environ.setdefault("PAPELA_PURGE_AFTER_DONE", "false")
 
 from app.config import get_settings  # noqa: E402
+from app.db import Database  # noqa: E402
 from app.main import app  # noqa: E402
-from app.ocr import build_engine  # noqa: E402
 from app.repository import JobRepository  # noqa: E402
 from app.storage import pdf_exists, purge_expired_jobs  # noqa: E402
 from app.worker import process_one  # noqa: E402
@@ -50,13 +50,9 @@ def _db_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _db_available(), reason="Postgres not reachable on PAPELA_DATABASE_URL"
-)
-
-
 @pytest.fixture()
 def client():
+    assert _db_available(), "Integration tests require disposable Postgres; no skips"
     with TestClient(app) as c:
         # Clean slate for deterministic assertions.
         with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
@@ -78,8 +74,7 @@ def test_upload_and_process_end_to_end(client: TestClient):
     # 2) Drive the worker inline (fake OCR) -> done
     s = get_settings()
     repo = JobRepository(app.state.db.pool)
-    engine = build_engine(s.ocr_engine, s.ocr_lang)
-    assert process_one(repo, engine, s) is True
+    assert process_one(repo, s) is True
 
     r = client.get(f"/v1/jobs/{job_id}", headers=AUTH)
     assert r.status_code == 200
@@ -153,8 +148,7 @@ def test_purge_after_done_deletes_pdf_and_stamps_audit(client: TestClient):
 
     purge_settings = s.model_copy(update={"purge_after_done": True})
     repo = JobRepository(app.state.db.pool)
-    engine = build_engine(s.ocr_engine, s.ocr_lang)
-    assert process_one(repo, engine, purge_settings) is True
+    assert process_one(repo, purge_settings) is True
 
     assert pdf_exists(job_id, s.storage_dir) is False
     audit = client.get(f"/v1/jobs/{job_id}/audit", headers=AUTH).json()
@@ -170,8 +164,7 @@ def test_retention_sweep_purges_expired_only(client: TestClient):
     s = get_settings()
     job_id = _upload(client)
     repo = JobRepository(app.state.db.pool)
-    engine = build_engine(s.ocr_engine, s.ocr_lang)
-    process_one(repo, engine, s)  # done, PDF kept (test env => no purge)
+    process_one(repo, s)  # done, PDF kept (test env => no purge)
     assert pdf_exists(job_id, s.storage_dir) is True
 
     # retention_days=0 => everything done is expired.
@@ -249,10 +242,263 @@ def test_result_persisted_before_purge_is_crash_safe(client: TestClient):
     s = get_settings()
     job_id = _upload(client)
     repo = JobRepository(app.state.db.pool)
-    engine = build_engine(s.ocr_engine, s.ocr_lang)
-    process_one(repo, engine, s.model_copy(update={"purge_after_done": True}))
+    process_one(repo, s.model_copy(update={"purge_after_done": True}))
 
     body = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
     assert body["status"] == "done"
     assert body["result"]["page_count"] == 1  # result survived the purge
     assert pdf_exists(job_id, s.storage_dir) is False
+
+
+@pytest.mark.parametrize(
+    "path", ["/v1/upload", "/v1/jobs/invalid", "/v1/jobs/invalid/audit"]
+)
+@pytest.mark.parametrize("key", [None, "wrong-key", "test-key,wrong", "x" * 513])
+def test_credentials_fail_closed(client, path, key):
+    headers = {} if key is None else {"X-API-Key": key}
+    response = (
+        client.post(path, headers=headers)
+        if path == "/v1/upload"
+        else (client.get(path, headers=headers))
+    )
+    assert response.status_code == 401
+
+
+def test_duplicate_key_header_is_rejected(client):
+    response = client.get(
+        "/v1/jobs/invalid",
+        headers=[
+            ("X-API-Key", "test-key"),
+            ("X-API-Key", "wrong"),
+        ],
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("payload", [b"", b"GIF89a", b"%PDF-1.4\ntruncated"])
+def test_invalid_upload_cleanup(client, payload):
+    from pathlib import Path
+
+    root = Path(get_settings().storage_dir)
+    before = set(root.glob("*.pdf"))
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={
+            "file": ("secret.pdf", payload, "application/pdf"),
+        },
+    )
+    assert response.status_code == 400
+    assert set(root.glob("*.pdf")) == before
+    assert "truncated" not in response.text
+
+
+@pytest.mark.parametrize(
+    "filename", ["../../nota.pdf", "/tmp/nota.pdf", "C:\\tmp\\nota.pdf"]
+)
+def test_filename_does_not_control_storage(client, filename):
+    from pathlib import Path
+
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={
+            "file": (filename, _minimal_pdf(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    assert (Path(get_settings().storage_dir) / f"{job_id}.pdf").is_file()
+    assert (
+        client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["filename"] == "nota.pdf"
+    )
+
+
+def test_mime_mismatch_and_file_limit(client, monkeypatch):
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={
+            "file": ("nota.pdf", _minimal_pdf(), "text/plain"),
+        },
+    )
+    assert response.status_code == 400
+    monkeypatch.setattr(get_settings(), "max_upload_bytes", 100)
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={
+            "file": ("nota.pdf", _minimal_pdf(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 413
+    response = client.post("/v1/upload", headers=AUTH, content=b"x" * 70000)
+    assert response.status_code == 413
+
+
+def test_invalid_id_does_not_echo_input(client):
+    response = client.get("/v1/jobs/SECRET-invalid-id", headers=AUTH)
+    assert response.status_code == 422
+    assert "SECRET" not in response.text
+
+
+def test_unknown_resource_and_invalid_credentials(client):
+    import uuid
+
+    job_id = _upload(client)
+    assert (
+        client.get(f"/v1/jobs/{job_id}", headers={"X-API-Key": "other"}).status_code
+        == 401
+    )
+    assert client.get(f"/v1/jobs/{uuid.uuid4()}", headers=AUTH).status_code == 404
+
+
+def test_request_id_headers_host_docs_and_cors(client):
+    import uuid
+
+    response = client.get(
+        "/health", headers={"X-Request-ID": "sensitive-untrusted-text"}
+    )
+    uuid.UUID(response.headers["x-request-id"])
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-store"
+    assert "strict-transport-security" not in response.headers
+    assert (
+        client.get("/health", headers={"Host": "attacker.example"}).status_code == 400
+    )
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+    response = client.options(
+        "/v1/upload",
+        headers={
+            **AUTH,
+            "Origin": "https://attacker.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" not in response.headers
+    assert (
+        client.get("/health", headers={"X-Forwarded-For": "127.0.0.1"}).status_code
+        == 200
+    )
+
+
+def test_errors_and_orphan_cleanup(client, monkeypatch):
+    from pathlib import Path
+
+    root = Path(get_settings().storage_dir)
+    before = set(root.glob("*.pdf"))
+
+    def fail(**kwargs):
+        raise RuntimeError("SECRET SQL /private/customer.pdf CPF 12345678901")
+
+    monkeypatch.setattr(app.state.repo, "create", fail)
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={
+            "file": ("nota.pdf", _minimal_pdf(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 500
+    assert response.json()["error"] == "internal error"
+    assert "SECRET" not in response.text
+    assert set(root.glob("*.pdf")) == before
+
+
+def test_rate_and_storage_limits(client, monkeypatch):
+    from app.security import RateLimiter
+
+    app.state.rate_limiter = RateLimiter(1)
+    assert client.get("/v1/jobs/invalid", headers=AUTH).status_code == 422
+    response = client.get("/v1/jobs/invalid", headers=AUTH)
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "60"
+    app.state.rate_limiter = RateLimiter(60)
+    monkeypatch.setattr(get_settings(), "max_storage_bytes", 1)
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={
+            "file": ("nota.pdf", _minimal_pdf(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 507
+    assert response.json()["error"] == "storage capacity exceeded"
+
+
+def test_worker_rejects_arbitrary_path_and_purges_terminal_failure(client):
+    job_id = _upload(client)
+    with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE jobs SET storage_path = %s WHERE id = %s", ("/etc/passwd", job_id)
+        )
+    repo = JobRepository(app.state.db.pool)
+    settings = get_settings().model_copy(update={"max_attempts": 1})
+    assert process_one(repo, settings)
+    body = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+    assert body["status"] == "failed"
+    assert body["purged_at"] is not None
+    assert not pdf_exists(job_id, settings.storage_dir)
+    assert "passwd" not in body["error"]
+
+
+def test_worker_deadline_and_retry_limit(client):
+    job_id = _upload(client)
+    repo = JobRepository(app.state.db.pool)
+    settings = get_settings().model_copy(
+        update={
+            "max_attempts": 2,
+            "processing_timeout_s": 0.000001,
+        }
+    )
+    assert process_one(repo, settings)
+    assert repo.get(job_id)["status"] == "pending"
+    assert process_one(repo, settings)
+    assert repo.get(job_id)["status"] == "failed"
+    assert not pdf_exists(job_id, settings.storage_dir)
+    assert not process_one(repo, settings)
+
+
+def test_production_rejects_privileged_db_role(client):
+    settings = get_settings().model_copy(update={"env": "production"})
+    db = Database(settings)
+    with pytest.raises(RuntimeError, match="least-privilege"):
+        db.open()
+
+
+def test_production_rejects_weak_or_missing_keys(monkeypatch):
+    monkeypatch.setattr(get_settings(), "env", "production")
+    with pytest.raises(RuntimeError):
+        with TestClient(app):
+            pass
+
+
+def test_production_rejects_fake_ocr_and_disabled_purge(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "env", "production")
+    monkeypatch.setattr(settings, "api_keys", "x" * 32)
+    monkeypatch.setattr(settings, "database_url", "postgresql://app:synthetic-strong@db:5432/app")
+    with pytest.raises(RuntimeError, match="Fake OCR"):
+        with TestClient(app):
+            pass
+    monkeypatch.setattr(settings, "ocr_engine", "paddle")
+    monkeypatch.setattr(settings, "purge_after_done", False)
+    with pytest.raises(RuntimeError, match="purge"):
+        with TestClient(app):
+            pass
+
+
+@pytest.mark.parametrize("stall,processing", [(1, 60), (120, 120)])
+def test_reaper_must_follow_processing_deadline(stall, processing):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        type(get_settings()).model_validate(
+            get_settings().model_dump()
+            | {
+                "stall_timeout_s": stall,
+                "processing_timeout_s": processing,
+            }
+        )

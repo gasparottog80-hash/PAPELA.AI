@@ -52,6 +52,10 @@ RUN --mount=type=ssh,required=true \
 
 FROM base AS runtime
 
+# Build/install tooling is not needed to execute the pre-built virtualenv.
+# Remove global pip/setuptools/wheel and their vendored runtime CVE surface.
+RUN /usr/local/bin/python -m pip uninstall --yes pip setuptools wheel
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
@@ -63,9 +67,10 @@ COPY --from=builder /app/scripts/verify_extractor.py /app/scripts/verify_extract
 
 # Non-root: the app never needs root, and the PDF volume is chown'd to it.
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data/pdfs && chown -R appuser:appuser /data /app
+    && mkdir -p /data/pdfs && chmod 700 /data/pdfs \
+    && chown -R appuser:appuser /data /app
 USER appuser
 
 # Default command = API. Compose overrides `command` for the worker.
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", "--no-access-log", "--limit-concurrency", "32", "--timeout-keep-alive", "5"]

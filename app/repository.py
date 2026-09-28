@@ -111,9 +111,10 @@ class JobRepository:
                 """
                 SELECT id::text
                 FROM jobs
-                WHERE status = 'done'
+                WHERE status IN ('done', 'failed')
                   AND purged_at IS NULL
-                  AND created_at < now() - make_interval(days => %s)
+                  AND (status = 'failed'
+                       OR created_at < now() - make_interval(days => %s))
                 """,
                 (retention_days,),
             )

@@ -2,10 +2,21 @@ from __future__ import annotations
 
 import threading
 import time
+from hmac import compare_digest
 
 from fastapi import Header, HTTPException, Request, status
 
 from .config import get_settings
+
+
+def valid_api_key(value: str | None) -> bool:
+    if not value or len(value) > 512 or not value.isascii():
+        return False
+    # Evaluate every configured key; do not short-circuit on the matching key.
+    matched = False
+    for key in get_settings().api_key_set:
+        matched |= compare_digest(value.encode(), key.encode())
+    return matched
 
 
 async def require_api_key(
@@ -14,13 +25,11 @@ async def require_api_key(
 ) -> str:
     """Fail-closed API-key auth. No configured keys => every request is 401
     (except /health, which is unauthenticated by design for probes)."""
-    settings = get_settings()
-    keys = settings.api_key_set
-    if not x_api_key or x_api_key not in keys:
+    if len(request.headers.getlist("x-api-key")) != 1 or not valid_api_key(x_api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key"
         )
-    request.state.api_key = x_api_key
+    assert x_api_key is not None
     return x_api_key
 
 

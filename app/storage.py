@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+from pathlib import Path
 from typing import BinaryIO
+from uuid import UUID
 
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from .config import get_settings
+from .processing import bounded_process
 
 logger = logging.getLogger("papela.storage")
 
@@ -15,6 +18,16 @@ PDF_MAGIC = b"%PDF-"
 class InvalidPdfError(ValueError):
     """Raised when an upload is not a valid, in-limits PDF."""
 
+    status_code = 400
+
+
+class PdfTooLargeError(InvalidPdfError):
+    status_code = 413
+
+
+class StorageCapacityError(InvalidPdfError):
+    status_code = 507
+
 
 def get_pdf_path(job_id: str, storage_dir: str) -> str:
     """Deterministic on-disk path for a job's raw PDF.
@@ -22,12 +35,18 @@ def get_pdf_path(job_id: str, storage_dir: str) -> str:
     Derived only from the (server-generated) job_id, never the client
     filename, so there is no path-traversal surface.
     """
-    return os.path.join(storage_dir, f"{job_id}.pdf")
+    name = str(UUID(job_id))
+    root = Path(storage_dir).resolve()
+    path = root / f"{name}.pdf"
+    if path.is_symlink():
+        raise InvalidPdfError("unsafe storage entry")
+    return str(path)
 
 
 def safe_name(filename: str) -> str:
     """Sanitized display-only filename (never used to build a path)."""
-    return os.path.basename(filename)[:255] or "upload.pdf"
+    name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    return "".join(c for c in name if c.isprintable())[:255] or "upload.pdf"
 
 
 def save_pdf_chunked(
@@ -44,13 +63,20 @@ def save_pdf_chunked(
     Fail-closed: the partial file is deleted on any rejection so a bad upload
     never leaves an orphan (nor a sensitive doc) on disk.
     """
-    os.makedirs(storage_dir, exist_ok=True)
+    os.makedirs(storage_dir, mode=0o700, exist_ok=True)
     path = get_pdf_path(job_id, storage_dir)
 
+    settings = get_settings()
+    used = sum(p.stat().st_size for p in Path(storage_dir).glob("*.pdf"))
+    if used + max_bytes > settings.max_storage_bytes:
+        raise StorageCapacityError("storage capacity exceeded")
+    if shutil.disk_usage(storage_dir).free < max_bytes + 1024 * 1024:
+        raise StorageCapacityError("storage capacity exceeded")
     size = 0
     first = True
     try:
-        with open(path, "wb") as out:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as out:
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -61,16 +87,16 @@ def save_pdf_chunked(
                     first = False
                 size += len(chunk)
                 if size > max_bytes:
-                    raise InvalidPdfError(f"file exceeds {max_bytes} bytes")
+                    raise PdfTooLargeError(f"file exceeds {max_bytes} bytes")
                 out.write(chunk)
 
         if size == 0:
             raise InvalidPdfError("empty file")
 
         try:
-            pages = len(PdfReader(path).pages)
-        except PdfReadError as exc:
-            raise InvalidPdfError(f"corrupt PDF: {exc}") from exc
+            pages = int(bounded_process("validate", path, settings))
+        except (ValueError, TimeoutError) as exc:
+            raise InvalidPdfError("corrupt, encrypted or over-budget PDF") from exc
 
         if pages == 0:
             raise InvalidPdfError("PDF has no pages")

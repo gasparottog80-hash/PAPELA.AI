@@ -1,5 +1,10 @@
 # PAPELA.AI
 
+> Security readiness: Gate 3 is **BLOCKED**; see
+> [the security audit](docs/gate3-security.md). The current API has one shared
+> trust domain: any valid key can access every job. Do not use it for isolated
+> customers or expose the development Compose to the Internet.
+
 On-premise OCR pipeline for fiscal documents (notas, contratos). Upload a PDF,
 a local worker runs OCR (PaddleOCR, Apache-2.0), and structured output lands in
 Postgres. No data leaves the host — LGPD-friendly.

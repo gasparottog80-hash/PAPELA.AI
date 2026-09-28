@@ -2,6 +2,15 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*ed25519*
+!.github/ssh_known_hosts
+.mypy_cache/
+.ruff_cache/
+graphify-out/
 .pytest_cache/
 dist/
 *.egg-info/

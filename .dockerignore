@@ -7,5 +7,11 @@ data/
 __pycache__/
 *.pyc
 .env
+.env.*
+*.pem
+*.key
+**/.ssh/
+**/*ed25519*
+graphify-out/
 dist/
 *.egg-info/

@@ -17,7 +17,7 @@ services:
       POSTGRES_PASSWORD: papela
       POSTGRES_DB: papela
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U papela"]
       interval: 3s
@@ -28,10 +28,14 @@ services:
 
   api:
     build: .
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: *app-env
     ports:
-      - "8077:8000"
+      - "127.0.0.1:8077:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,6 +49,10 @@ services:
 
   worker:
     build: .
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     command: ["python", "-m", "app.worker"]
     environment:
       <<: *app-env

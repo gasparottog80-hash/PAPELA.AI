@@ -127,6 +127,7 @@ jobs:
         run: |
           docker compose -f compose.gate1.yml up --detach --wait --wait-timeout 90 api worker
           uv run --no-sync python scripts/smoke_ci.py
+          uv run --no-sync python scripts/smoke_security.py
           git diff --exit-code -- pyproject.toml uv.lock
           git diff --check
 

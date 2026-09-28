@@ -14,7 +14,12 @@ class JsonFormatter(logging.Formatter):
             "ts": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            # Only application event identifiers are allowed. Third-party logs
+            # (including PDF parser warnings and DB retry messages) are suppressed.
+            "msg": record.msg
+            if isinstance(record.msg, str)
+            and record.msg.replace(".", "").replace("_", "").isalnum()
+            else "event",
         }
         request_id = getattr(record, "request_id", None)
         if request_id is not None:
@@ -23,14 +28,17 @@ class JsonFormatter(logging.Formatter):
         error = getattr(record, "error", None)
         if error is not None:
             payload["error"] = error
-        if record.exc_info:
-            payload["exc"] = self.formatException(record.exc_info)
+        if record.exc_info and record.exc_info[1]:
+            from .sanitize import sanitize_error
+
+            payload["error"] = sanitize_error(record.exc_info[1])
         return json.dumps(payload, ensure_ascii=False)
 
 
 def configure_logging(level: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
+    handler.addFilter(lambda record: record.name.startswith("papela."))
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
