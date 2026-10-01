@@ -142,6 +142,21 @@ def test_upload_requires_api_key(client: TestClient):
     assert r.status_code == 401
 
 
+def test_health_is_liveness_and_readiness_requires_database_and_storage(
+    client: TestClient, monkeypatch, tmp_path
+):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/readiness").json() == {"status": "ready"}
+    monkeypatch.setattr(app.state.db, "is_ready", lambda: False)
+    assert client.get("/health").status_code == 200
+    assert client.get("/readiness").status_code == 503
+    monkeypatch.setattr(app.state.db, "is_ready", lambda: True)
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "missing"))
+    assert client.get("/readiness").status_code == 503
+
+
 def test_upload_rejects_non_pdf(client: TestClient):
     # CRITICAL EDGE: bad magic bytes must be rejected before any job is created.
     r = client.post(

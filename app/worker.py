@@ -88,8 +88,11 @@ def run() -> None:
 
     idle_backoff = 0.5
     last_sweep = 0.0
+    heartbeat = Path("/tmp/papela-worker-heartbeat")
     try:
         while _running:
+            # The container probe detects a stalled loop, not just a live PID.
+            heartbeat.touch()
             now = time.monotonic()
             # Periodic maintenance: reap stalled jobs + LGPD retention sweep.
             if now - last_sweep >= settings.purge_interval_s:

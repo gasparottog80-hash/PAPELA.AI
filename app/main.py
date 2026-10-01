@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Request, Response, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -124,6 +128,26 @@ async def validation_error(request: Request, exc: RequestValidationError):
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/readiness")
+async def readiness(request: Request) -> Response:
+    """Only route traffic when Postgres and the private PDF volume are usable."""
+    settings = get_settings()
+    storage = Path(settings.storage_dir)
+    try:
+        storage_ready = (
+            storage.is_dir()
+            and os.access(storage, os.W_OK | os.X_OK)
+            and shutil.disk_usage(storage).free
+            >= settings.max_upload_bytes + 1024 * 1024
+        )
+    except OSError:
+        storage_ready = False
+    db_ready = await run_in_threadpool(request.app.state.db.is_ready)
+    if not storage_ready or not db_ready:
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
+    return JSONResponse(content={"status": "ready"})
 
 
 @app.post(

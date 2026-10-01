@@ -1,0 +1,6 @@
+FROM postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+# The official entrypoint supports an already-unprivileged postgres user.
+# Drop gosu: this binary is only used for a root-to-postgres transition and
+# currently contains a stale Go runtime with known severe CVEs.
+RUN rm /usr/local/bin/gosu
+USER 70:70

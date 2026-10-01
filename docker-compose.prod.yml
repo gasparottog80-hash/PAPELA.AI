@@ -1,0 +1,208 @@
+# Single-VPS production topology. Never combine with docker-compose.yml.
+# Migrations are explicit: `docker compose --profile ops run --rm migrate`.
+name: ${PAPELA_PROJECT_NAME:-papela-production}
+
+x-app-env: &app-env
+  PAPELA_ENV: production
+  PAPELA_OCR_ENGINE: text
+  PAPELA_PURGE_AFTER_DONE: "true"
+  PAPELA_STORAGE_DIR: /data/pdfs
+  PAPELA_ALLOWED_HOSTS: ${PAPELA_DOMAIN:?set a real FQDN},localhost,127.0.0.1
+  PAPELA_DB_POOL_MIN: "1"
+  PAPELA_DB_POOL_MAX: "5"
+  PAPELA_MAX_STORAGE_BYTES: ${PAPELA_MAX_STORAGE_BYTES:?set a PDF quota}
+
+services:
+  postgres:
+    image: papela-postgres:gate4
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_USER: papela_owner
+      POSTGRES_DB: papela
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --encoding=UTF8
+      TZ: UTC
+    secrets:
+      - pg_admin_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - database
+    shm_size: 256m
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1024m
+    cpus: 1.0
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q", "-h", "127.0.0.1", "-U", "papela_owner", "-d", "papela"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  migrate:
+    profiles: [ops]
+    image: papela-migrate:gate4
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    pull_policy: never
+    restart: "no"
+    user: "70:70"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    secrets:
+      - pg_admin_password
+      - pg_runtime_password
+    networks:
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    pids_limit: 64
+
+  api:
+    image: ${PAPELA_APP_IMAGE:?build a private local application image first}
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 20s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,uid=65532,gid=65532
+    environment: *app-env
+    secrets:
+      - source: app_database_url
+        target: PAPELA_DATABASE_URL
+      - source: tenant_api_keys
+        target: PAPELA_TENANT_API_KEYS
+    volumes:
+      - pdfs:/data/pdfs
+    networks:
+      - edge
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1536m
+    cpus: 1.0
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readiness', timeout=3)"]
+      interval: 10s
+      timeout: 4s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: ${PAPELA_APP_IMAGE:?build a private local application image first}
+    pull_policy: never
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    stop_grace_period: 150s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,uid=65532,gid=65532
+    environment: *app-env
+    secrets:
+      - source: app_database_url
+        target: PAPELA_DATABASE_URL
+    volumes:
+      - pdfs:/data/pdfs
+    networks:
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2048m
+    cpus: 2.0
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/papela-worker-heartbeat'; assert time.time()-os.stat(p).st_mtime < 180"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: papela-caddy:gate4
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    pull_policy: never
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777,uid=10001,gid=10001
+    environment:
+      PAPELA_DOMAIN: ${PAPELA_DOMAIN:?set a real FQDN}
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /config
+    ports:
+      - "${PAPELA_HTTP_BIND:-0.0.0.0}:${PAPELA_HTTP_PORT:-80}:80"
+      - "${PAPELA_HTTPS_BIND:-0.0.0.0}:${PAPELA_HTTPS_PORT:-443}:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  edge: {}
+  database:
+    internal: true
+
+volumes:
+  pgdata: {}
+  pdfs: {}
+  caddy_data: {}
+  caddy_config: {}
+
+secrets:
+  pg_admin_password:
+    file: ${PAPELA_PG_ADMIN_PASSWORD_FILE:?provide an external secret file}
+  pg_runtime_password:
+    file: ${PAPELA_PG_RUNTIME_PASSWORD_FILE:?provide an external secret file}
+  app_database_url:
+    file: ${PAPELA_DATABASE_URL_FILE:?provide an external secret file}
+  tenant_api_keys:
+    file: ${PAPELA_TENANT_API_KEYS_FILE:?provide an external secret file}

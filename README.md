@@ -4,6 +4,10 @@
 > [the security audit](docs/gate3-security.md). The default Compose is a
 > loopback-only development sample, not a production deployment.
 
+> The isolated single-VPS infrastructure candidate and its operational
+> limits are documented in [Gate 4](docs/gate4-production.md). Gate 4 is
+> currently blocked by Caddy image advisories; it is not a go-live approval.
+
 On-premise fiscal-document pipeline. The safe MVP path extracts embedded text
 from digital PDFs; native PaddleOCR remains optional and is **not** permitted
 in the production image while its dependency advisories remain unresolved.
@@ -29,6 +33,7 @@ Structured output lands in Postgres. No document is sent to a third-party API.
 ## Endpoints
 
 - `GET  /health`             unauthenticated liveness probe
+- `GET  /readiness`          Postgres + private storage readiness probe
 - `POST /v1/upload`          multipart `file` (PDF); returns 202 + job_id
 - `GET  /v1/jobs/{id}`       job status + result
 - `GET  /v1/jobs/{id}/audit` LGPD audit: `file_exists` + `purged_at`

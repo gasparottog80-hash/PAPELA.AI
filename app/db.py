@@ -130,6 +130,14 @@ class Database:
     def close(self) -> None:
         self._pool.close()
 
+    def is_ready(self) -> bool:
+        """Bounded, read-only check for routing new requests to this API."""
+        try:
+            with self._pool.connection(timeout=2.0) as conn:
+                return conn.execute("SELECT 1").fetchone() == (1,)
+        except Exception:
+            return False
+
     @property
     def pool(self) -> ConnectionPool:
         return self._pool

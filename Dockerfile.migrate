@@ -1,0 +1,8 @@
+FROM postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+# The one-shot migrator runs as uid 70 and never invokes the upstream
+# privilege-switch helper. Exclude that unused Go binary (and its CVEs).
+RUN rm /usr/local/bin/gosu
+COPY app/migrations/0001_initial.sql /opt/papela/0001_initial.sql
+COPY app/migrations/0002_tenant_isolation.sql /opt/papela/0002_tenant_isolation.sql
+COPY ops/0000_lock.sql ops/010_runtime_role.sql ops/migrate.sh /opt/papela/
+ENTRYPOINT ["/bin/sh", "/opt/papela/migrate.sh"]

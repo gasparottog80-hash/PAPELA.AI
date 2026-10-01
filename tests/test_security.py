@@ -32,6 +32,22 @@ def test_valid_keys_resolve_distinct_owners_without_returning_credentials():
     )
 
 
+def test_production_settings_load_mounted_secret_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAPELA_ENV", "production")
+    monkeypatch.setenv("PAPELA_API_KEYS", "")
+    monkeypatch.delenv("PAPELA_DATABASE_URL", raising=False)
+    monkeypatch.delenv("PAPELA_TENANT_API_KEYS", raising=False)
+    (tmp_path / "PAPELA_DATABASE_URL").write_text(
+        "postgresql://papela_runtime:synthetic-secret@postgres:5432/papela"
+    )
+    (tmp_path / "PAPELA_TENANT_API_KEYS").write_text(
+        '{"22222222-2222-4222-8222-222222222222":"synthetic-key"}'
+    )
+    settings = Settings(_secrets_dir=tmp_path, _env_file=None)
+    assert settings.database_url.startswith("postgresql://papela_runtime:")
+    assert len(settings.tenant_api_keys) == 1
+
+
 @pytest.mark.parametrize(
     "mapping",
     [

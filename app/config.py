@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Literal
 from uuid import UUID
@@ -115,4 +116,11 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    # Compose grants only the required /run/secrets files to each service.
+    # Keep development/test behavior unchanged; production may also use
+    # explicit environment variables supplied by a secret manager.
+    if os.environ.get("PAPELA_ENV", "production") == "production":
+        # BaseSettings accepts this runtime-only override, but its generated
+        # constructor signature does not expose the private settings kwargs.
+        return Settings(_secrets_dir="/run/secrets")  # type: ignore[call-arg]
     return Settings()
