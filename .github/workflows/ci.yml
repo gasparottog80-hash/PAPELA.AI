@@ -37,10 +37,6 @@ jobs:
       PAPELA_HTTP_PORT: '18080'
       PAPELA_HTTPS_BIND: 127.0.0.1
       PAPELA_HTTPS_PORT: '18443'
-      PAPELA_PG_ADMIN_PASSWORD_FILE: ${{ runner.temp }}/papela-gate4-secrets/pg_admin_password
-      PAPELA_PG_RUNTIME_PASSWORD_FILE: ${{ runner.temp }}/papela-gate4-secrets/pg_runtime_password
-      PAPELA_DATABASE_URL_FILE: ${{ runner.temp }}/papela-gate4-secrets/app_database_url
-      PAPELA_TENANT_API_KEYS_FILE: ${{ runner.temp }}/papela-gate4-secrets/tenant_api_keys
     steps:
       # Do not replace this with pull_request_target to expose private source.
       - name: Require a trusted repository event
@@ -175,6 +171,13 @@ jobs:
 
       - name: Gate 4 production topology with synthetic credentials
         run: |
+          export PAPELA_PG_ADMIN_PASSWORD_FILE="$RUNNER_TEMP/papela-gate4-secrets/pg_admin_password"
+          export PAPELA_PG_RUNTIME_PASSWORD_FILE="$RUNNER_TEMP/papela-gate4-secrets/pg_runtime_password"
+          export PAPELA_DATABASE_URL_FILE="$RUNNER_TEMP/papela-gate4-secrets/app_database_url"
+          export PAPELA_TENANT_API_KEYS_FILE="$RUNNER_TEMP/papela-gate4-secrets/tenant_api_keys"
+          printf 'PAPELA_PG_ADMIN_PASSWORD_FILE=%s\nPAPELA_PG_RUNTIME_PASSWORD_FILE=%s\nPAPELA_DATABASE_URL_FILE=%s\nPAPELA_TENANT_API_KEYS_FILE=%s\n' \
+            "$PAPELA_PG_ADMIN_PASSWORD_FILE" "$PAPELA_PG_RUNTIME_PASSWORD_FILE" \
+            "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE" >> "$GITHUB_ENV"
           install -d -m 700 "$RUNNER_TEMP/papela-gate4-secrets"
           admin_password=$(openssl rand -hex 24)
           runtime_password=$(openssl rand -hex 24)
@@ -204,7 +207,7 @@ jobs:
       - name: Remove Gate 4 synthetic stack and credentials
         if: ${{ always() }}
         run: |
-          if [[ -f docker-compose.prod.yml ]]; then
+          if [[ -n "${PAPELA_PG_ADMIN_PASSWORD_FILE:-}" && -f docker-compose.prod.yml ]]; then
             docker compose -f docker-compose.prod.yml down --volumes --remove-orphans
           fi
           rm -f "$RUNNER_TEMP/papela-gate4-root.crt"
