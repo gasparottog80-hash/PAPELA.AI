@@ -25,6 +25,7 @@ jobs:
       PAPELA_ENV: test
       PAPELA_DATABASE_URL: postgresql://gate1:gate1-test-only@127.0.0.1:55433/gate1
       PAPELA_API_KEYS: test-key
+      PAPELA_TENANT_API_KEYS: '{"22222222-2222-4222-8222-222222222222":"gate1-synthetic-b-key"}'
       PAPELA_OCR_ENGINE: fake
       PAPELA_STORAGE_DIR: ./data/ci-uploads
       PAPELA_PURGE_AFTER_DONE: 'false'
@@ -81,8 +82,8 @@ jobs:
         env:
           DOCKER_BUILDKIT: '1'
         run: |
-          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" --tag papelaai-gate1-revalidated .
-          docker run --rm --network none papelaai-gate1-revalidated python scripts/verify_extractor.py
+          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" --tag papelaai-gate3-revalidated .
+          docker run --rm --network none papelaai-gate3-revalidated python scripts/verify_extractor.py
 
       - name: Remove automation key from agent
         if: ${{ always() }}
@@ -93,6 +94,35 @@ jobs:
           fi
 
       # No agent credential remains while test/application scripts execute.
+      - name: Scan the final runtime image without publishing it
+        run: |
+          docker save --output "$RUNNER_TEMP/papela-gate3-runtime.tar" papelaai-gate3-revalidated
+          docker run --rm \
+            --mount "type=bind,source=$RUNNER_TEMP,target=/scan" \
+            aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --input /scan/papela-gate3-runtime.tar \
+            --cache-dir /scan/trivy-cache --scanners vuln,secret \
+            --severity CRITICAL,HIGH --format json \
+            --output /scan/papela-gate3-scan.json --timeout 5m --quiet
+          python - "$RUNNER_TEMP/papela-gate3-scan.json" <<'PY'
+          import json
+          import sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          results = report.get("Results") or []
+          assert results, "Image scan produced no targets"
+          severe = sum(
+              v.get("Severity") in {"CRITICAL", "HIGH"}
+              for result in results
+              for v in (result.get("Vulnerabilities") or [])
+          )
+          secrets = sum(len(result.get("Secrets") or []) for result in results)
+          assert not severe and not secrets, (
+              f"Runtime scan blocked: {severe} severe advisories, "
+              f"{secrets} secret findings"
+          )
+          print("Runtime scan PASS: zero CRITICAL/HIGH and zero secret findings")
+          PY
+
       - name: Lint and typecheck
         run: |
           uv run --no-sync ruff check .
@@ -137,5 +167,6 @@ jobs:
           if [[ -f compose.gate1.yml ]]; then
             docker compose -f compose.gate1.yml down --volumes --remove-orphans
           fi
+          rm -f "$RUNNER_TEMP/papela-gate3-runtime.tar" "$RUNNER_TEMP/papela-gate3-scan.json"
 
       # No artifact/image upload: installed runtime contains proprietary IP.

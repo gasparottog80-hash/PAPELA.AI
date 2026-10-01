@@ -25,6 +25,7 @@ class JobRepository:
         self,
         *,
         job_id: str,
+        tenant_id: str,
         filename: str,
         storage_path: str,
         size_bytes: int,
@@ -33,14 +34,30 @@ class JobRepository:
         with self._pool.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO jobs (id, filename, storage_path, size_bytes, pages)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO jobs
+                    (id, tenant_id, filename, storage_path, size_bytes, pages)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (job_id, filename, storage_path, size_bytes, pages),
+                (job_id, tenant_id, filename, storage_path, size_bytes, pages),
             )
         return job_id
 
-    def get(self, job_id: str) -> dict[str, Any] | None:
+    def get_for_tenant(self, job_id: str, tenant_id: str) -> dict[str, Any] | None:
+        """The only job lookup exposed to HTTP handlers (404 across tenants)."""
+        with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                """
+                SELECT id::text, status, filename, pages, result, error,
+                       attempts, created_at, updated_at, purged_at
+                FROM jobs WHERE id = %s AND tenant_id = %s
+                """,
+                (job_id, tenant_id),
+            )
+            return cur.fetchone()
+
+    def get_internal(self, job_id: str) -> dict[str, Any] | None:
+        """Worker-only lookup after claiming the server-generated job UUID."""
         with self._pool.connection() as conn:
             cur = conn.cursor(row_factory=dict_row)
             cur.execute(
@@ -52,6 +69,18 @@ class JobRepository:
                 (job_id,),
             )
             return cur.fetchone()
+
+    def delete_terminal_for_tenant(self, job_id: str, tenant_id: str) -> bool:
+        """Delete only a terminal job owned by this tenant after PDF removal."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM jobs
+                WHERE id = %s AND tenant_id = %s AND status IN ('done', 'failed')
+                """,
+                (job_id, tenant_id),
+            )
+            return cur.rowcount == 1
 
     def claim_next(self) -> dict[str, Any] | None:
         """Atomically claim one pending job. Returns None if queue empty."""

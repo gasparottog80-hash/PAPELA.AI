@@ -6,11 +6,12 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
-from app.config import get_settings
+from app.config import DEVELOPMENT_LEGACY_TENANT_ID, Settings, get_settings
 from app.http_security import SecurityBoundary
 from app.logging_config import JsonFormatter
-from app.security import RateLimiter, valid_api_key
+from app.security import RateLimiter, tenant_for_api_key, valid_api_key
 from app.storage import get_pdf_path
 
 
@@ -22,6 +23,31 @@ def test_invalid_key(key):
 def test_no_configured_keys_fail_closed(monkeypatch):
     monkeypatch.setattr(get_settings(), "api_keys", "")
     assert not valid_api_key("test-key")
+
+
+def test_valid_keys_resolve_distinct_owners_without_returning_credentials():
+    assert tenant_for_api_key("test-key") == DEVELOPMENT_LEGACY_TENANT_ID
+    assert tenant_for_api_key("gate1-synthetic-b-key") == (
+        "22222222-2222-4222-8222-222222222222"
+    )
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"00000000-0000-0000-0000-000000000001": "different-key"},
+        {"not-a-uuid": "different-key"},
+        {
+            "22222222-2222-4222-8222-222222222222": "same-key",
+            "33333333-3333-4333-8333-333333333333": "same-key",
+        },
+    ],
+)
+def test_invalid_tenant_mapping_fails_closed(mapping):
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            get_settings().model_dump() | {"tenant_api_keys": mapping}
+        )
 
 
 @pytest.mark.parametrize("job_id", ["../secret", "/etc/passwd", "not-uuid"])

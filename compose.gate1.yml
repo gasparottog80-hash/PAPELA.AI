@@ -5,6 +5,7 @@ name: papela-gate1-revalidation
 x-test-env: &test-env
   PAPELA_DATABASE_URL: postgresql://gate1:gate1-test-only@postgres:5432/gate1
   PAPELA_API_KEYS: gate1-synthetic-test-key
+  PAPELA_TENANT_API_KEYS: '{"22222222-2222-4222-8222-222222222222":"gate1-synthetic-b-key"}'
   PAPELA_ENV: test
   PAPELA_OCR_ENGINE: fake
   PAPELA_STORAGE_DIR: /data/pdfs
@@ -28,7 +29,7 @@ services:
       retries: 20
 
   api:
-    image: papelaai-gate1-revalidated
+    image: papelaai-gate3-revalidated
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -49,7 +50,7 @@ services:
       retries: 20
 
   worker:
-    image: papelaai-gate1-revalidated
+    image: papelaai-gate3-revalidated
     security_opt:
       - no-new-privileges:true
     cap_drop:

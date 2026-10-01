@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
-# Single image shared by api + worker. Fake OCR by default; add the `ocr`
-# extra + system libs when wiring real PaddleOCR (see comment below).
+# Single minimal image shared by api + worker. Native PaddleOCR is excluded.
 FROM python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e AS base
 
 FROM base AS builder
@@ -33,8 +32,7 @@ github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAA
 github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
 EOF
 
-# For real PaddleOCR add: libgl1 libglib2.0-0 (OpenCV runtime) and install
-# `--extra ocr` to uv sync. Kept out of the default image to stay slim.
+# Do not install the `ocr` extra in this image. It has unmitigated advisories.
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
 COPY scripts/verify_extractor.py ./scripts/verify_extractor.py
@@ -50,26 +48,50 @@ RUN --mount=type=ssh,required=true \
     UV_PYTHON_DOWNLOADS=never uv sync --locked --no-dev --no-editable --link-mode=copy \
     && .venv/bin/python scripts/verify_extractor.py
 
-FROM base AS runtime
+# Retain only Debian runtime libraries needed by Python/psycopg. OpenSSL is
+# upgraded from the Debian security repository, and the actual dpkg metadata
+# is copied with the binaries so image scanners see the installed version.
+FROM base AS patched-libs
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        libssl3t64=3.5.7-1~deb13u3 \
+    && mkdir -p /pkgmeta \
+    && for package in libssl3t64 libffi8 libgcc-s1; do \
+        dpkg-query -s "$package" > "/pkgmeta/$package"; \
+    done \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build/install tooling is not needed to execute the pre-built virtualenv.
 # Remove global pip/setuptools/wheel and their vendored runtime CVE surface.
-RUN /usr/local/bin/python -m pip uninstall --yes pip setuptools wheel
+FROM builder AS stripped-python
+RUN /usr/local/bin/python -m pip uninstall --yes pip setuptools wheel \
+    && mkdir -p /runtime-data/pdfs \
+    && chmod 700 /runtime-data/pdfs
+
+FROM gcr.io/distroless/base-debian13@sha256:0896741ba5bafd3ac87ea025a5f578952f2d238ddc3614cb368acc983a687aa2 AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH"
+    LD_LIBRARY_PATH="/usr/local/lib" \
+    PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 
 WORKDIR /app
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=stripped-python /usr/local/bin/python3 /usr/local/bin/python3
+COPY --from=stripped-python /usr/local/bin/python3.11 /usr/local/bin/python3.11
+COPY --from=stripped-python /usr/local/lib/libpython3.11.so.1.0 /usr/local/lib/libpython3.11.so.1.0
+COPY --from=stripped-python /usr/local/lib/python3.11 /usr/local/lib/python3.11
+COPY --from=patched-libs /usr/lib/x86_64-linux-gnu/libffi.so.8 /usr/lib/x86_64-linux-gnu/libffi.so.8
+COPY --from=patched-libs /usr/lib/x86_64-linux-gnu/libgcc_s.so.1 /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+COPY --from=patched-libs /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libssl.so.3
+COPY --from=patched-libs /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3
+COPY --from=patched-libs /pkgmeta/ /var/lib/dpkg/status.d/
+COPY --from=stripped-python --chown=65532:65532 /app/.venv /app/.venv
 COPY --from=builder /app/uv.lock /app/uv.lock
 COPY --from=builder /app/scripts/verify_extractor.py /app/scripts/verify_extractor.py
+COPY --from=stripped-python --chown=65532:65532 --chmod=0700 /runtime-data/pdfs /data/pdfs
 
-# Non-root: the app never needs root, and the PDF volume is chown'd to it.
-RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data/pdfs && chmod 700 /data/pdfs \
-    && chown -R appuser:appuser /data /app
-USER appuser
+# Distroless has no shell/package manager. Keep the same non-root runtime.
+USER 65532:65532
 
 # Default command = API. Compose overrides `command` for the worker.
 EXPOSE 8000

@@ -1,8 +1,9 @@
-"""Smoke the isolated Gate 1 Compose stack, never a production endpoint."""
+"""Smoke the isolated synthetic CI stack, never a production endpoint."""
 
 from __future__ import annotations
 
 import io
+import os
 import time
 
 import httpx
@@ -10,11 +11,17 @@ from pypdf import PdfWriter
 
 
 def main() -> None:
+    target = os.environ.get("PAPELA_SMOKE_BASE_URL", "http://127.0.0.1:18077")
+    if target not in {"http://127.0.0.1:18077", "http://api:8000"}:
+        raise RuntimeError("Smoke target must be the isolated test stack")
+    host = {"Host": "localhost"} if target == "http://api:8000" else None
     pdf = io.BytesIO()
     writer = PdfWriter()
     writer.add_blank_page(width=200, height=200)
     writer.write(pdf)
-    with httpx.Client(base_url="http://127.0.0.1:18077", timeout=5) as client:
+    with httpx.Client(
+        base_url=target, timeout=5, headers=host, trust_env=False
+    ) as client:
         assert client.get("/health").status_code == 200, "Health check failed"
         assert client.post("/v1/upload").status_code == 401
         headers = {"X-API-Key": "gate1-synthetic-test-key"}
@@ -48,7 +55,13 @@ def main() -> None:
         assert audit.status_code == 200
         assert audit.json()["file_exists"] is False
         assert audit.json()["purged_at"] is not None
-    print("Smoke PASS: health, auth, upload, async worker, extractor, PDF purge")
+        other = {"X-API-Key": "gate1-synthetic-b-key"}
+        assert client.get(f"/v1/jobs/{job_id}", headers=other).status_code == 404
+        assert client.get(f"/v1/jobs/{job_id}/audit", headers=other).status_code == 404
+        assert client.delete(f"/v1/jobs/{job_id}", headers=other).status_code == 404
+        assert client.delete(f"/v1/jobs/{job_id}", headers=headers).status_code == 204
+        assert client.get(f"/v1/jobs/{job_id}", headers=headers).status_code == 404
+    print("Smoke PASS: E2E, cross-tenant denial, owner delete and PDF purge")
 
 
 if __name__ == "__main__":

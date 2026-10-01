@@ -1,13 +1,20 @@
 """Negative HTTP smoke against the disposable Gate 1 stack only."""
 from __future__ import annotations
 
+import os
 from uuid import UUID
 
 import httpx
 
 
 def main() -> None:
-    with httpx.Client(base_url="http://127.0.0.1:18077", timeout=10) as client:
+    target = os.environ.get("PAPELA_SMOKE_BASE_URL", "http://127.0.0.1:18077")
+    if target not in {"http://127.0.0.1:18077", "http://api:8000"}:
+        raise RuntimeError("Smoke target must be the isolated test stack")
+    host = {"Host": "localhost"} if target == "http://api:8000" else None
+    with httpx.Client(
+        base_url=target, timeout=10, headers=host, trust_env=False
+    ) as client:
         key = {"X-API-Key": "gate1-synthetic-test-key"}
         response = client.get(
             "/health", headers={"X-Request-ID": "unsafe injected value"}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from importlib.resources import files
 
 from psycopg_pool import ConnectionPool
 
@@ -8,12 +9,11 @@ from .config import Settings
 
 logger = logging.getLogger("papela.db")
 
-# Single schema bootstrap. Idempotent; safe to run on every startup.
-# In a larger project this moves to Alembic/atlas; for a single-table
-# pipeline an idempotent DDL block is the honest minimal choice.
+# Development/test bootstrap only. Production schema changes are operator-run.
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS jobs (
     id           UUID PRIMARY KEY,
+    tenant_id    UUID NOT NULL,
     status       TEXT NOT NULL DEFAULT 'pending'
                  CHECK (status IN ('pending','processing','done','failed')),
     filename     TEXT NOT NULL,
@@ -94,8 +94,34 @@ class Database:
                         raise RuntimeError(
                             "Production requires provisioned least-privilege DB role"
                         )
+                    tenant_column = conn.execute(
+                        "SELECT attnotnull FROM pg_attribute "
+                        "WHERE attrelid = to_regclass('public.jobs') "
+                        "AND attname = 'tenant_id' AND NOT attisdropped"
+                    ).fetchone()
+                    if not tenant_column or not tenant_column[0]:
+                        raise RuntimeError(
+                            "Production requires tenant isolation migration"
+                        )
+                    immutable_trigger = conn.execute(
+                        "SELECT 1 FROM pg_trigger "
+                        "WHERE tgrelid = to_regclass('public.jobs') "
+                        "AND tgname = 'jobs_tenant_immutable' "
+                        "AND tgenabled IN ('O', 'A') AND NOT tgisinternal"
+                    ).fetchone()
+                    if not immutable_trigger:
+                        raise RuntimeError(
+                            "Production requires immutable tenant ownership"
+                        )
                 else:
                     conn.execute(SCHEMA_SQL)
+                    migration = (
+                        files("app")
+                        .joinpath("migrations/0002_tenant_isolation.sql")
+                        .read_text(encoding="utf-8")
+                    )
+                    with conn.transaction():
+                        conn.execute(migration)
         except Exception:
             self._pool.close()
             raise

@@ -60,12 +60,12 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
         )
         # A cleanup failure after mark_done must not requeue an already persisted
         # result. The retention sweep will retry deletion with purged_at still NULL.
-        row = repo.get(job_id)
+        row = repo.get_internal(job_id)
         if row is not None and row["status"] == "processing":
             repo.mark_failed(
                 job_id, sanitize_error(exc), max_attempts=settings.max_attempts
             )
-            row = repo.get(job_id)
+            row = repo.get_internal(job_id)
         if row is not None and row["status"] == "failed":
             delete_pdf(job_id, settings.storage_dir, reason="terminal-failure")
             repo.mark_purged(job_id)

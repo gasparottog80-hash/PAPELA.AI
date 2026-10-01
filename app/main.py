@@ -5,7 +5,7 @@ import uuid
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Request, UploadFile, status
+from fastapi import Depends, FastAPI, Request, Response, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
@@ -35,13 +35,19 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    # Fail-closed: refuse to serve in prod without API keys configured.
-    if settings.env == "production" and not settings.api_key_set:
+    # A legacy shared-key list has no per-customer owner. Production only
+    # accepts an explicit, unique tenant-to-key mapping.
+    if settings.env == "production" and (
+        settings.api_key_set or not settings.tenant_api_keys
+    ):
         raise RuntimeError(
-            "PAPELA_API_KEYS is empty in production; refusing to start (fail-closed)"
+            "Production requires PAPELA_TENANT_API_KEYS without legacy keys"
         )
     if settings.env == "production":
-        if any(len(key) < 32 or not key.isascii() for key in settings.api_key_set):
+        if any(
+            len(key) < 32 or not key.isascii()
+            for _, key in settings.tenant_key_pairs
+        ):
             raise RuntimeError("Production requires strong ASCII API keys")
         if urlsplit(settings.database_url).password in {
             None,
@@ -49,8 +55,10 @@ async def lifespan(app: FastAPI):
             "gate1-test-only",
         }:
             raise RuntimeError("Production requires explicit database credentials")
-        if settings.ocr_engine == "fake":
-            raise RuntimeError("Fake OCR is forbidden in production")
+        if settings.ocr_engine != "text":
+            raise RuntimeError(
+                "Production MVP requires text-layer extraction; native OCR is disabled"
+            )
         if not settings.purge_after_done:
             raise RuntimeError("Production requires raw-PDF purge after completion")
 
@@ -89,6 +97,7 @@ async def http_error(request: Request, exc: HTTPException):
         401: "invalid api key",
         404: "not found",
         405: "method not allowed",
+        409: "job is not terminal",
         413: "request too large",
     }
     return JSONResponse(
@@ -126,7 +135,7 @@ async def health() -> dict[str, str]:
 async def upload(
     request: Request,
     file: UploadFile,
-    api_key: str = Depends(require_api_key),
+    tenant_id: str = Depends(require_api_key),
 ):
     settings = get_settings()
     request_id: str = request.state.request_id
@@ -159,6 +168,7 @@ async def upload(
     try:
         repo.create(
             job_id=job_id,
+            tenant_id=tenant_id,
             filename=safe_name(file.filename or "upload.pdf"),
             storage_path=storage_path,
             size_bytes=size,
@@ -179,10 +189,10 @@ async def upload(
 async def get_job(
     job_id: uuid.UUID,
     request: Request,
-    api_key: str = Depends(require_api_key),
+    tenant_id: str = Depends(require_api_key),
 ):
     repo: JobRepository = request.app.state.repo
-    row = repo.get(str(job_id))
+    row = repo.get_for_tenant(str(job_id), tenant_id)
     if row is None:
         return JSONResponse(
             status_code=404,
@@ -200,13 +210,13 @@ async def get_job(
 async def get_job_audit(
     job_id: uuid.UUID,
     request: Request,
-    api_key: str = Depends(require_api_key),
+    tenant_id: str = Depends(require_api_key),
 ):
     """LGPD audit view: whether the raw PDF still exists on disk vs. purged.
     Cross-checks the DB purged_at stamp against the actual filesystem so
     drift (file gone but not stamped, or vice-versa) is visible."""
     repo: JobRepository = request.app.state.repo
-    row = repo.get(str(job_id))
+    row = repo.get_for_tenant(str(job_id), tenant_id)
     if row is None:
         return JSONResponse(
             status_code=404,
@@ -221,3 +231,22 @@ async def get_job_audit(
         "purged_at": row["purged_at"].isoformat() if row["purged_at"] else None,
         "file_exists": pdf_exists(str(job_id), settings.storage_dir),
     }
+
+
+@app.delete("/v1/jobs/{job_id}", status_code=204)
+async def delete_job(
+    job_id: uuid.UUID,
+    request: Request,
+    tenant_id: str = Depends(require_api_key),
+):
+    """Delete a tenant's terminal result and raw PDF; active jobs cannot race it."""
+    repo: JobRepository = request.app.state.repo
+    row = repo.get_for_tenant(str(job_id), tenant_id)
+    if row is None:
+        raise HTTPException(status_code=404)
+    if row["status"] not in ("done", "failed"):
+        raise HTTPException(status_code=409)
+    delete_pdf(str(job_id), get_settings().storage_dir, reason="tenant-delete")
+    if not repo.delete_terminal_for_tenant(str(job_id), tenant_id):
+        raise HTTPException(status_code=409)
+    return Response(status_code=204)

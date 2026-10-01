@@ -13,13 +13,17 @@ os.environ.setdefault(
     "PAPELA_DATABASE_URL", "postgresql://papela:papela@localhost:5433/papela"
 )
 os.environ.setdefault("PAPELA_API_KEYS", "test-key")
+os.environ.setdefault(
+    "PAPELA_TENANT_API_KEYS",
+    '{"22222222-2222-4222-8222-222222222222":"gate1-synthetic-b-key"}',
+)
 os.environ.setdefault("PAPELA_OCR_ENGINE", "fake")
 os.environ.setdefault("PAPELA_STORAGE_DIR", "./data/test-uploads")
 # Tests opt OUT of purge-after-done so retention/audit paths can inspect the
 # file; the dedicated purge test re-enables it via Settings.model_copy.
 os.environ.setdefault("PAPELA_PURGE_AFTER_DONE", "false")
 
-from app.config import get_settings  # noqa: E402
+from app.config import DEVELOPMENT_LEGACY_TENANT_ID, get_settings  # noqa: E402
 from app.db import Database  # noqa: E402
 from app.main import app  # noqa: E402
 from app.repository import JobRepository  # noqa: E402
@@ -27,6 +31,7 @@ from app.storage import pdf_exists, purge_expired_jobs  # noqa: E402
 from app.worker import process_one  # noqa: E402
 
 AUTH = {"X-API-Key": "test-key"}
+AUTH_B = {"X-API-Key": "gate1-synthetic-b-key"}
 
 
 def _minimal_pdf() -> bytes:
@@ -40,6 +45,31 @@ def _minimal_pdf() -> bytes:
         b"0000000052 00000 n \n0000000101 00000 n \n"
         b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n164\n%%EOF\n"
     )
+
+
+def _digital_text_pdf() -> bytes:
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    content = DecodedStreamObject()
+    content.set_data(b"BT /F1 12 Tf 25 100 Td (Invoice 123) Tj ET")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    data = io.BytesIO()
+    writer.write(data)
+    return data.getvalue()
 
 
 def _db_available() -> bool:
@@ -181,13 +211,13 @@ def _insert_stalled_job(job_id: str, *, attempts: int, age_seconds: int) -> None
     with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
         conn.execute(
             """
-            INSERT INTO jobs (id, status, filename, storage_path, size_bytes,
+            INSERT INTO jobs (id, tenant_id, status, filename, storage_path, size_bytes,
                               pages, attempts, created_at, updated_at)
-            VALUES (%s, 'processing', 'stalled.pdf', '/nonexistent.pdf', 1, 1, %s,
+            VALUES (%s, %s, 'processing', 'stalled.pdf', '/nonexistent.pdf', 1, 1, %s,
                     now() - make_interval(secs => %s),
                     now() - make_interval(secs => %s))
             """,
-            (job_id, attempts, age_seconds, age_seconds),
+            (job_id, DEVELOPMENT_LEGACY_TENANT_ID, attempts, age_seconds, age_seconds),
         )
 
 
@@ -454,9 +484,9 @@ def test_worker_deadline_and_retry_limit(client):
         }
     )
     assert process_one(repo, settings)
-    assert repo.get(job_id)["status"] == "pending"
+    assert repo.get_internal(job_id)["status"] == "pending"
     assert process_one(repo, settings)
-    assert repo.get(job_id)["status"] == "failed"
+    assert repo.get_internal(job_id)["status"] == "failed"
     assert not pdf_exists(job_id, settings.storage_dir)
     assert not process_one(repo, settings)
 
@@ -478,12 +508,17 @@ def test_production_rejects_weak_or_missing_keys(monkeypatch):
 def test_production_rejects_fake_ocr_and_disabled_purge(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "env", "production")
-    monkeypatch.setattr(settings, "api_keys", "x" * 32)
+    monkeypatch.setattr(settings, "api_keys", "")
+    monkeypatch.setattr(
+        settings,
+        "tenant_api_keys",
+        {"22222222-2222-4222-8222-222222222222": "x" * 32},
+    )
     monkeypatch.setattr(settings, "database_url", "postgresql://app:synthetic-strong@db:5432/app")
-    with pytest.raises(RuntimeError, match="Fake OCR"):
+    with pytest.raises(RuntimeError, match="text-layer"):
         with TestClient(app):
             pass
-    monkeypatch.setattr(settings, "ocr_engine", "paddle")
+    monkeypatch.setattr(settings, "ocr_engine", "text")
     monkeypatch.setattr(settings, "purge_after_done", False)
     with pytest.raises(RuntimeError, match="purge"):
         with TestClient(app):
@@ -502,3 +537,116 @@ def test_reaper_must_follow_processing_deadline(stall, processing):
                 "processing_timeout_s": processing,
             }
         )
+
+
+def test_tenant_isolation_for_status_result_audit_and_delete(client: TestClient):
+    job_a = _upload(client)
+    response_b = client.post(
+        "/v1/upload",
+        headers=AUTH_B,
+        files={"file": ("b.pdf", _minimal_pdf(), "application/pdf")},
+    )
+    assert response_b.status_code == 202
+    job_b = response_b.json()["job_id"]
+    with psycopg.connect(get_settings().database_url) as conn:
+        owners = dict(
+            conn.execute(
+                "SELECT id::text, tenant_id::text FROM jobs WHERE id IN (%s, %s)",
+                (job_a, job_b),
+            ).fetchall()
+        )
+    assert owners[job_a] == DEVELOPMENT_LEGACY_TENANT_ID
+    assert owners[job_b] == "22222222-2222-4222-8222-222222222222"
+
+    assert client.get(f"/v1/jobs/{job_a}", headers=AUTH).status_code == 200
+    assert client.get(f"/v1/jobs/{job_b}", headers=AUTH_B).status_code == 200
+    assert client.delete(f"/v1/jobs/{job_a}").status_code == 401
+    assert client.delete(
+        f"/v1/jobs/{job_a}", headers={"X-API-Key": "invalid"}
+    ).status_code == 401
+    for path in (f"/v1/jobs/{job_a}", f"/v1/jobs/{job_a}/audit"):
+        denied = client.get(path, headers=AUTH_B)
+        missing = client.get(
+            "/v1/jobs/00000000-0000-0000-0000-000000000000", headers=AUTH_B
+        )
+        assert denied.status_code == missing.status_code == 404
+        assert denied.json()["error"] == missing.json()["error"]
+    assert client.delete(f"/v1/jobs/{job_a}", headers=AUTH_B).status_code == 404
+    assert client.delete(f"/v1/jobs/{job_b}", headers=AUTH_B).status_code == 409
+
+    repo = JobRepository(app.state.db.pool)
+    assert process_one(repo, get_settings())
+    assert client.get(f"/v1/jobs/{job_a}", headers=AUTH).json()["status"] == "done"
+    assert client.get(f"/v1/jobs/{job_a}", headers=AUTH_B).status_code == 404
+    assert client.delete(f"/v1/jobs/{job_a}", headers=AUTH).status_code == 204
+    assert client.get(f"/v1/jobs/{job_a}", headers=AUTH).status_code == 404
+    assert client.get(f"/v1/jobs/{job_b}", headers=AUTH_B).status_code == 200
+
+
+def test_text_layer_pipeline_with_real_extractor(client: TestClient):
+    response = client.post(
+        "/v1/upload",
+        headers=AUTH,
+        files={"file": ("digital.pdf", _digital_text_pdf(), "application/pdf")},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    repo = JobRepository(app.state.db.pool)
+    settings = get_settings().model_copy(update={"ocr_engine": "text"})
+    assert process_one(repo, settings)
+    result = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+    assert result["status"] == "done"
+    assert result["result"]["engine"] == "text"
+    assert result["result"]["pages"][0]["text"] == "Invoice 123"
+    assert "fields" in result["result"]
+
+
+def test_job_tenant_id_cannot_be_changed(client: TestClient):
+    job_id = _upload(client)
+    with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
+        with pytest.raises(psycopg.Error, match="immutable"):
+            conn.execute(
+                "UPDATE jobs SET tenant_id = %s WHERE id = %s",
+                ("22222222-2222-4222-8222-222222222222", job_id),
+            )
+    assert client.get(f"/v1/jobs/{job_id}", headers=AUTH).status_code == 200
+    assert client.get(f"/v1/jobs/{job_id}", headers=AUTH_B).status_code == 404
+
+
+def test_explicit_migration_preserves_and_quarantines_legacy_rows(client: TestClient):
+    from importlib.resources import files
+
+    migration = (
+        files("app")
+        .joinpath("migrations/0002_tenant_isolation.sql")
+        .read_text(encoding="utf-8")
+    )
+
+    class RollBackSyntheticSchema(Exception):
+        pass
+
+    try:
+        with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
+            with conn.transaction():
+                conn.execute("CREATE SCHEMA gate3_migration_test")
+                conn.execute("SET LOCAL search_path TO gate3_migration_test")
+                conn.execute(
+                    "CREATE TABLE jobs (id UUID PRIMARY KEY, "
+                    "created_at TIMESTAMPTZ DEFAULT now())"
+                )
+                legacy_id = "33333333-3333-4333-8333-333333333333"
+                conn.execute("INSERT INTO jobs (id) VALUES (%s)", (legacy_id,))
+                conn.execute(migration)
+                row = conn.execute(
+                    "SELECT id::text, tenant_id::text FROM jobs WHERE id = %s",
+                    (legacy_id,),
+                ).fetchone()
+                assert row == (
+                    legacy_id,
+                    "00000000-0000-0000-0000-000000000001",
+                )
+                conn.execute(migration)  # explicit migration is idempotent
+                assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+                raise RollBackSyntheticSchema
+    except RollBackSyntheticSchema:
+        pass

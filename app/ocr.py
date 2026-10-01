@@ -91,6 +91,36 @@ class FakeOcrEngine:
         }
 
 
+class TextLayerEngine:
+    """Production MVP path for selectable-text PDFs; no OCR models/native extra.
+
+    Scanned/image-only PDFs are deliberately rejected, not silently reported as
+    extracted. This does not recognize images or reconstruct visual tables.
+    """
+
+    def extract(self, pdf_path: str) -> dict[str, Any]:
+        from pypdf import PdfReader
+
+        reader = PdfReader(pdf_path, strict=True)
+        pages = [
+            {
+                "page": i + 1,
+                "text": (page.extract_text() or "").strip(),
+                "confidence": 1.0,
+                "tables": [],
+            }
+            for i, page in enumerate(reader.pages)
+        ]
+        if not any(page["text"] for page in pages):
+            raise ValueError("text layer unavailable")
+        return {
+            "engine": "text",
+            "schema_version": SCHEMA_VERSION,
+            "page_count": len(pages),
+            "pages": pages,
+        }
+
+
 def _pdf_to_bgr_images(pdf_path: str, dpi: int = 200):
     """Yield (page_index, BGR numpy image) for each PDF page. PaddleOCR expects
     BGR; PyMuPDF renders RGB(A), so we drop alpha and flip channels."""
@@ -227,6 +257,8 @@ class PPStructureEngine:
 
 
 def build_engine(name: str, lang: str) -> OcrEngine:
+    if name == "text":
+        return TextLayerEngine()
     if name == "ppstructure":
         return PPStructureEngine(lang=lang)
     if name == "paddle":

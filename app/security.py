@@ -4,37 +4,45 @@ import threading
 import time
 from hmac import compare_digest
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import HTTPException, Request, status
 
 from .config import get_settings
 
 
-def valid_api_key(value: str | None) -> bool:
+def tenant_for_api_key(value: str | None) -> str | None:
     if not value or len(value) > 512 or not value.isascii():
-        return False
-    # Evaluate every configured key; do not short-circuit on the matching key.
-    matched = False
-    for key in get_settings().api_key_set:
-        matched |= compare_digest(value.encode(), key.encode())
-    return matched
+        return None
+    # Evaluate all keys with no early return. Never persist/log the supplied key.
+    owner: str | None = None
+    matches = 0
+    candidate = value.encode("ascii")
+    for tenant_id, key in get_settings().tenant_key_pairs:
+        equal = compare_digest(candidate, key.encode("ascii"))
+        matches += int(equal)
+        if equal:
+            owner = tenant_id
+    return owner if matches == 1 else None
+
+
+def valid_api_key(value: str | None) -> bool:
+    return tenant_for_api_key(value) is not None
 
 
 async def require_api_key(
     request: Request,
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> str:
-    """Fail-closed API-key auth. No configured keys => every request is 401
-    (except /health, which is unauthenticated by design for probes)."""
-    if len(request.headers.getlist("x-api-key")) != 1 or not valid_api_key(x_api_key):
+    """Return the authenticated tenant ID, never the raw credential."""
+    keys = request.headers.getlist("x-api-key")
+    tenant_id = tenant_for_api_key(keys[0]) if len(keys) == 1 else None
+    if tenant_id is None or request.state.tenant_id != tenant_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key"
         )
-    assert x_api_key is not None
-    return x_api_key
+    return tenant_id
 
 
 class RateLimiter:
-    """Per-key fixed-window limiter, in-process, thread-safe.
+    """Per-tenant fixed-window limiter, in-process, thread-safe.
 
     Honest limitation: in-process only, so it does NOT coordinate across
     multiple API replicas. For a single on-prem node this is correct; scale

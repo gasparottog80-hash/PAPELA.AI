@@ -1,17 +1,17 @@
 # PAPELA.AI
 
-> Security readiness: Gate 3 is **BLOCKED**; see
-> [the security audit](docs/gate3-security.md). The current API has one shared
-> trust domain: any valid key can access every job. Do not use it for isolated
-> customers or expose the development Compose to the Internet.
+> Gate 3 security evidence is in
+> [the security audit](docs/gate3-security.md). The default Compose is a
+> loopback-only development sample, not a production deployment.
 
-On-premise OCR pipeline for fiscal documents (notas, contratos). Upload a PDF,
-a local worker runs OCR (PaddleOCR, Apache-2.0), and structured output lands in
-Postgres. No data leaves the host — LGPD-friendly.
+On-premise fiscal-document pipeline. The safe MVP path extracts embedded text
+from digital PDFs; native PaddleOCR remains optional and is **not** permitted
+in the production image while its dependency advisories remain unresolved.
+Structured output lands in Postgres. No document is sent to a third-party API.
 
 ## Architecture
 
-    client --POST /v1/upload--> API (validate + store to disk, insert job=pending) --> 202 job_id
+    client --POST /v1/upload--> API (authenticate tenant, validate, store, insert job=pending) --> 202 job_id
                                                         |
                                                    Postgres (jobs table = queue)
                                                         |
@@ -21,7 +21,8 @@ Postgres. No data leaves the host — LGPD-friendly.
 
 - Async by design: OCR is CPU-bound (seconds–minutes); never runs in the request path.
 - Queue = Postgres `SELECT ... FOR UPDATE SKIP LOCKED`. No Redis/Celery. On-prem.
-- OCR behind `OcrEngine`: `fake` (dev/CI, no model download) or `paddle` (real).
+- Processing behind `OcrEngine`: `text` (digital PDFs, production MVP), `fake`
+  (dev/CI only), or native PaddleOCR (disabled in production).
 - API + worker are the SAME image; compose runs them as separate services on a
   shared `papela_pdfs` volume (API writes, worker reads + purges).
 
@@ -31,9 +32,14 @@ Postgres. No data leaves the host — LGPD-friendly.
 - `POST /v1/upload`          multipart `file` (PDF); returns 202 + job_id
 - `GET  /v1/jobs/{id}`       job status + result
 - `GET  /v1/jobs/{id}/audit` LGPD audit: `file_exists` + `purged_at`
+- `DELETE /v1/jobs/{id}`     delete an owned terminal job and its raw PDF
 
-Auth: `X-API-Key` header. Fail-closed — in `production` the app refuses to start
-without `PAPELA_API_KEYS` set. Rate limit: per-key fixed window (in-process).
+Auth: `X-API-Key` header. In production, `PAPELA_TENANT_API_KEYS` must be a
+JSON object mapping stable tenant UUIDs to unique strong keys; the legacy
+comma-separated `PAPELA_API_KEYS` is **development/test only**. Every job has an
+immutable `tenant_id`, and cross-tenant reads/deletes return 404. Rate limits
+are per tenant, in-process. See the migration procedure in
+[the security audit](docs/gate3-security.md) before upgrading any existing DB.
 
 ## LGPD compliance
 
@@ -57,11 +63,10 @@ The raw PDF is the sensitive artifact; the pipeline minimizes its lifetime on di
 - Auditability: every deletion emits a structured log line (`pdf.deleted`, with
   job_id + reason) and stamps `jobs.purged_at`. `GET /v1/jobs/{id}/audit`
   cross-checks the DB stamp against the actual filesystem.
-- What is NOT deleted here: the extracted text/JSON in Postgres. Purging that is a
-  separate retention decision (add a DELETE-by-age sweep on the `jobs` table when
-  the legal retention period for the extracted data is defined).
-- Data never leaves the host: OCR is local (PaddleOCR), queue is Postgres, storage
-  is a local volume. No third-party API calls.
+- Extracted JSON stays in Postgres until the owner deletes a terminal job via
+  `DELETE /v1/jobs/{id}`. Automatic JSON retention remains a separate legal
+  and operational decision for a later gate.
+- Processing, queue and storage are local. No third-party document API calls.
 
 Relevant env vars (see `.env.example`):
 
@@ -70,15 +75,15 @@ Relevant env vars (see `.env.example`):
     PAPELA_PURGE_INTERVAL_S   int (3600)   maintenance loop period (sweep + reaper)
     PAPELA_STALL_TIMEOUT_S    int (300)    requeue jobs stuck in 'processing' this long
 
-## Run (Docker, all 3 services)
+## Run (Docker development sample, all 3 services)
 
-    # api on host :8077, postgres on host :5433, worker in background
+    # Loopback API :8077, Postgres :5433; synthetic credentials and fake OCR.
+    # Do not use this Compose as a production deployment.
     docker compose build --ssh default
-    PAPELA_ENV=production PAPELA_API_KEYS=change-me PAPELA_PURGE_AFTER_DONE=true \
-      docker compose up -d
+    docker compose up -d
 
     curl -s -X POST http://localhost:8077/v1/upload \
-      -H "X-API-Key: change-me" -F "file=@nota.pdf;type=application/pdf"
+      -H "X-API-Key: dev-key-change-me" -F "file=@nota.pdf;type=application/pdf"
     docker compose logs -f worker      # watch job.claimed / pdf.deleted / job.done
 
 ## Run (dev, without Docker)
@@ -87,7 +92,7 @@ Relevant env vars (see `.env.example`):
     docker compose up -d postgres --wait   # just Postgres (host :5433)
     uv venv --python 3.11
     uv sync --locked --extra dev          # API/worker/tests (fake OCR)
-    # uv sync --locked --extra dev --extra ocr  # + real PaddleOCR runtime
+    # The `ocr` extra is not approved for production; do not add it to the image.
 
     uv run uvicorn app.main:app --reload           # API
     uv run python -m app.worker                    # worker (separate process)
@@ -95,7 +100,7 @@ Relevant env vars (see `.env.example`):
 ## Test
 
     docker compose up -d postgres --wait
-    uv run pytest                          # skips gracefully if Postgres unreachable
+    uv run pytest                          # fails if Postgres is unavailable
 
 ## Quality checks
 
@@ -153,5 +158,6 @@ implementation by design.
   against a real anonymized DANFE/NFS-e corpus before any SLA claim; add a
   labeled fixture set + per-field accuracy report.
 - Known limits: rate limiter is per-process (single node); move to
-  Postgres/Redis to scale out. No schema migrations tool yet (idempotent DDL
-  on startup). No retention sweep on the extracted JSON yet (only on raw PDFs).
+  Postgres/Redis to scale out. The explicit tenant migration must be applied
+  by a schema owner before production startup. No automatic retention sweep
+  exists for extracted JSON yet (only for raw PDFs).

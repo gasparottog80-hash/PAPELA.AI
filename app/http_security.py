@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import get_settings
-from .security import valid_api_key
+from .security import tenant_for_api_key
 
 logger = logging.getLogger("papela.api")
 
@@ -62,10 +62,12 @@ class SecurityBoundary:
         try:
             if scope["path"].startswith("/v1/"):
                 keys = request.headers.getlist("x-api-key")
-                if len(keys) != 1 or not valid_api_key(keys[0]):
+                tenant_id = tenant_for_api_key(keys[0]) if len(keys) == 1 else None
+                if tenant_id is None:
                     await reject(401, "invalid api key")
                     return
-                if not scope["app"].state.rate_limiter.allow(keys[0]):
+                scope["state"]["tenant_id"] = tenant_id
+                if not scope["app"].state.rate_limiter.allow(tenant_id):
                     await reject(429, "rate limit exceeded")
                     return
             # Also bound bodies on methods/routes that have no upload handler.
