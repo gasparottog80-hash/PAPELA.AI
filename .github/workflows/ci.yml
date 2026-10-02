@@ -175,10 +175,13 @@ jobs:
           export PAPELA_PG_RUNTIME_PASSWORD_FILE="$RUNNER_TEMP/papela-gate4-secrets/pg_runtime_password"
           export PAPELA_DATABASE_URL_FILE="$RUNNER_TEMP/papela-gate4-secrets/app_database_url"
           export PAPELA_TENANT_API_KEYS_FILE="$RUNNER_TEMP/papela-gate4-secrets/tenant_api_keys"
-          printf 'PAPELA_PG_ADMIN_PASSWORD_FILE=%s\nPAPELA_PG_RUNTIME_PASSWORD_FILE=%s\nPAPELA_DATABASE_URL_FILE=%s\nPAPELA_TENANT_API_KEYS_FILE=%s\n' \
+          export PAPELA_BACKUP_DIR="$RUNNER_TEMP/papela-gate6-backups"
+          printf 'PAPELA_PG_ADMIN_PASSWORD_FILE=%s\nPAPELA_PG_RUNTIME_PASSWORD_FILE=%s\nPAPELA_DATABASE_URL_FILE=%s\nPAPELA_TENANT_API_KEYS_FILE=%s\nPAPELA_BACKUP_DIR=%s\n' \
             "$PAPELA_PG_ADMIN_PASSWORD_FILE" "$PAPELA_PG_RUNTIME_PASSWORD_FILE" \
-            "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE" >> "$GITHUB_ENV"
+            "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE" "$PAPELA_BACKUP_DIR" >> "$GITHUB_ENV"
           install -d -m 700 "$RUNNER_TEMP/papela-gate4-secrets"
+          install -d -m 700 "$PAPELA_BACKUP_DIR"
+          sudo chown 70:70 "$PAPELA_BACKUP_DIR"
           admin_password=$(openssl rand -hex 24)
           runtime_password=$(openssl rand -hex 24)
           printf '%s' "$admin_password" > "$PAPELA_PG_ADMIN_PASSWORD_FILE"
@@ -192,11 +195,13 @@ jobs:
           sudo chown 65532:65532 "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE"
           sudo chmod 400 "$PAPELA_PG_ADMIN_PASSWORD_FILE" "$PAPELA_PG_RUNTIME_PASSWORD_FILE" "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE"
           docker compose -f docker-compose.prod.yml config --quiet
-          docker compose -f docker-compose.prod.yml build caddy migrate postgres
+          docker compose -f docker-compose.prod.yml build caddy migrate postgres backup
           # Scan each final Gate 4 runtime before starting the synthetic stack.
           # No image or scan report is uploaded: they may reveal private code.
-          for component in caddy migrate postgres; do
-            image="papela-${component}:gate4"
+          for component in caddy migrate postgres backup; do
+            tag=gate4
+            [[ "$component" == backup ]] && tag=gate6
+            image="papela-${component}:${tag}"
             docker save --output "$RUNNER_TEMP/${component}-gate4.tar" "$image"
             docker run --rm \
               --mount "type=bind,source=$RUNNER_TEMP,target=/scan" \
@@ -263,6 +268,61 @@ jobs:
             exit 1
           fi
 
+      - name: Gate 6 isolated backup and destructive restore test
+        run: |
+          uv run --no-sync python scripts/smoke_backup_restore.py seed \
+            --state "$RUNNER_TEMP/gate6-jobs.json" --port 18443 \
+            --ca "$RUNNER_TEMP/papela-gate4-root.crt"
+          docker compose -f docker-compose.prod.yml stop worker
+          docker exec papela-gate4-ci-postgres-1 psql -X -q -U papela_owner -d papela \
+            -c "INSERT INTO jobs (id,tenant_id,filename,storage_path,size_bytes,pages) VALUES ('33333333-3333-4333-8333-333333333333','11111111-1111-4111-8111-111111111111','synthetic-pending.pdf','/data/pdfs/33333333-3333-4333-8333-333333333333.pdf',1,1)" >/dev/null
+          output=$(docker compose -f docker-compose.prod.yml --profile ops run --rm backup backup)
+          backup_id=$(printf '%s\n' "$output" | sed -n 's/^BACKUP_ID=//p')
+          [[ "$backup_id" =~ ^backup-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$ ]]
+          docker compose -f docker-compose.prod.yml --profile ops run --rm backup verify "$backup_id"
+          [[ "$(sudo stat -c '%a' "$PAPELA_BACKUP_DIR/$backup_id")" == 700 ]]
+          for file in database.dump database.sha256 metadata.json; do
+            [[ "$(sudo stat -c '%a' "$PAPELA_BACKUP_DIR/$backup_id/$file")" == 600 ]]
+          done
+          checksum_before=$(sudo sha256sum "$PAPELA_BACKUP_DIR/$backup_id/database.dump" | awk '{print $1}')
+          tampered_id=backup-20000101T000000Z-deadbeef
+          sudo cp -a "$PAPELA_BACKUP_DIR/$backup_id" "$PAPELA_BACKUP_DIR/$tampered_id"
+          printf x | sudo tee -a "$PAPELA_BACKUP_DIR/$tampered_id/database.dump" >/dev/null
+          if docker compose -f docker-compose.prod.yml --profile ops run --rm backup verify "$tampered_id"; then
+            echo '::error::Corrupted backup was accepted'
+            exit 1
+          fi
+          sudo rm -r -- "$PAPELA_BACKUP_DIR/$tampered_id"
+          docker compose -f docker-compose.prod.yml --profile ops run --rm backup retention "$backup_id" 7
+          if docker compose -f docker-compose.prod.yml --profile ops run --rm backup \
+            restore-test "$backup_id" papela; then
+            echo '::error::Restore accepted the source database as a target'
+            exit 1
+          fi
+          # Only the explicitly named disposable target database is destroyed.
+          docker exec papela-gate4-ci-postgres-1 createdb -U papela_owner papela_restore_gate6_ci
+          docker exec papela-gate4-ci-postgres-1 psql -X -q -U papela_owner -d papela_restore_gate6_ci \
+            -c 'CREATE TABLE restore_sentinel (id integer)' >/dev/null
+          docker exec papela-gate4-ci-postgres-1 dropdb -U papela_owner papela_restore_gate6_ci
+          docker exec papela-gate4-ci-postgres-1 createdb -U papela_owner papela_restore_gate6_ci
+          docker compose -f docker-compose.prod.yml --profile ops run --rm backup \
+            restore-test "$backup_id" papela_restore_gate6_ci
+          checksum_after=$(sudo sha256sum "$PAPELA_BACKUP_DIR/$backup_id/database.dump" | awk '{print $1}')
+          [[ "$checksum_before" == "$checksum_after" ]]
+          [[ "$(docker exec papela-gate4-ci-postgres-1 psql -X -Atq -U papela_owner -d papela_restore_gate6_ci -c 'SELECT count(DISTINCT tenant_id) FROM jobs')" == 2 ]]
+          pending_reconciled=$(docker exec papela-gate4-ci-postgres-1 psql -X -Atq -U papela_owner -d papela_restore_gate6_ci \
+            -c "SELECT count(*) FROM jobs WHERE status='failed' AND error='processing_error: RestoreRequiresResubmission'")
+          [[ "$pending_reconciled" == 1 ]]
+          docker compose -f docker-compose.prod.yml stop api worker
+          sudo sed -i 's@/papela$@/papela_restore_gate6_ci@' "$PAPELA_DATABASE_URL_FILE"
+          sudo chown 65532:65532 "$PAPELA_DATABASE_URL_FILE"
+          sudo chmod 400 "$PAPELA_DATABASE_URL_FILE"
+          docker compose -f docker-compose.prod.yml up --detach --force-recreate --wait --wait-timeout 120 api worker caddy
+          uv run --no-sync python scripts/smoke_backup_restore.py verify \
+            --state "$RUNNER_TEMP/gate6-jobs.json" --port 18443 \
+            --ca "$RUNNER_TEMP/papela-gate4-root.crt" \
+            --reconciled-job-id 33333333-3333-4333-8333-333333333333
+
       - name: Remove Gate 4 synthetic stack and credentials
         if: ${{ always() }}
         run: |
@@ -271,6 +331,10 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/papela-gate4-root.crt"
           rm -rf "$RUNNER_TEMP/papela-gate4-secrets"
+          if [[ "${PAPELA_BACKUP_DIR:-}" == "$RUNNER_TEMP/papela-gate6-backups" ]]; then
+            sudo rm -rf -- "$PAPELA_BACKUP_DIR"
+          fi
+          rm -f "$RUNNER_TEMP/gate6-jobs.json"
 
       - name: Remove isolated test containers and synthetic data
         if: ${{ always() }}

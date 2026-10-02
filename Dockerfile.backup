@@ -1,0 +1,7 @@
+FROM postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+# Same official PostgreSQL major/client as the server. The one-shot backup
+# process is already non-root; the upstream privilege switch is unnecessary.
+RUN rm /usr/local/bin/gosu
+COPY ops/backup.sh /opt/papela/backup.sh
+USER 70:70
+ENTRYPOINT ["/bin/sh", "/opt/papela/backup.sh"]

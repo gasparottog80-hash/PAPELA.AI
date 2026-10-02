@@ -102,8 +102,9 @@ local candidate. Before a VPS is eligible, scan its actual final images and
 rerun the complete smoke/CI checks.
 
 Take and **restore-test** a database backup before *any* migration on a
-nonempty database. Gate 6 has not supplied this procedure, so an existing
-production database must not be migrated yet. For a new empty database, start
+nonempty database. The [Gate 6 runbook](gate6-backup-restore.md) provides a
+local/CI-tested procedure, but offsite recovery and operator approval remain
+prerequisites for real customer data. For a new empty database, start
 Postgres and wait for health; then run the migrator explicitly:
 
 ```text

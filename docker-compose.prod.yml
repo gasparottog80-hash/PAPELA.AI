@@ -98,6 +98,37 @@ services:
     mem_limit: 256m
     pids_limit: 64
 
+  backup:
+    logging: *log-rotation
+    profiles: [ops]
+    image: papela-backup:gate6
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    pull_policy: never
+    restart: "no"
+    user: "70:70"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    secrets:
+      - pg_admin_password
+    volumes:
+      - type: bind
+        source: ${PAPELA_BACKUP_DIR:?provide a restricted backup directory outside the repository}
+        target: /backups
+    networks:
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    pids_limit: 64
+
   api:
     logging: *log-rotation
     image: ${PAPELA_APP_IMAGE:?build a private local application image first}

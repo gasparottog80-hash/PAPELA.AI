@@ -7,7 +7,8 @@
 > The isolated single-VPS infrastructure candidate and its operational
 > limits are documented in [Gate 4](docs/gate4-production.md). The
 > [Gate 5 observability design](docs/gate5-observability.md) adds private
-> metrics and privacy-minimized logs. Neither gate is a go-live approval.
+> metrics and privacy-minimized logs. The [Gate 6 backup/restore runbook](docs/gate6-backup-restore.md)
+> covers logical database recovery. None of these gates is a go-live approval.
 
 On-premise fiscal-document pipeline. The safe MVP path extracts embedded text
 from digital PDFs; native PaddleOCR remains optional and is **not** permitted

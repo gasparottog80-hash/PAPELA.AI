@@ -146,6 +146,10 @@ not transformed to JSON and require separate operator-side parsing if a
 collector is later approved. Gate 6 backup/restore, Gate 8 retention policy,
 public DNS/ACME and production deployment remain separate.
 
+Gate 6 adds one-shot backup/restore JSON events and a documented future alert
+plan for stale/failed backups, restore drills and backup disk pressure; see
+[the runbook](gate6-backup-restore.md). No scheduler or notifier is activated.
+
 ## Local revalidation on the Gate 5 candidate
 
 The locked package build and dependency check passed; Ruff and mypy passed
