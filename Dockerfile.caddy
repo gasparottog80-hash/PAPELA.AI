@@ -1,4 +1,21 @@
-FROM caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+FROM golang:1.26.8-alpine3.23@sha256:a8fa79c5bd40d880b52bd3b6d7669ecdcfd00e85facdd427d279efb5ddd79cb1 AS build
+
+WORKDIR /src
+COPY ops/caddy/go.mod ops/caddy/go.sum ./
+RUN go mod download && go mod verify
+RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags='-s -w -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4' -o /runtime/usr/bin/caddy github.com/caddyserver/caddy/v2/cmd/caddy \
+    && mkdir -p /runtime/data /runtime/config /runtime/tmp
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /runtime/usr/bin/caddy /usr/bin/caddy
+COPY --from=build --chown=10001:10001 /runtime/data /data
+COPY --from=build --chown=10001:10001 /runtime/config /config
 COPY Caddyfile.prod /etc/caddy/Caddyfile
-RUN mkdir -p /data /config /tmp && chown -R 10001:10001 /data /config /tmp
+
+ENV XDG_DATA_HOME=/data XDG_CONFIG_HOME=/config HOME=/tmp
 USER 10001:10001
+EXPOSE 80 443 443/udp
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/bin/caddy"]
+CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

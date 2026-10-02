@@ -10,7 +10,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "psycopg[binary]>=3.2",
     "psycopg-pool>=3.2",
-    "pypdf>=5.1",
+    "pypdf>=6.19.0",
     "python-multipart>=0.0.12",
     # Proprietary fiscal-field extraction core. Private, not on PyPI. PEP 508
     # direct Git reference (not [tool.uv.sources]) so plain `pip install .`

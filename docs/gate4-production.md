@@ -1,8 +1,11 @@
 # Gate 4 — single-VPS production infrastructure
 
-This is an infrastructure *candidate*, not a go-live authorization. **Gate 4
-remains BLOCKED** while the pinned Caddy release has known HIGH advisories in
-its exposed Go binary. Do not expose this image to the public Internet. No VPS,
+This is an infrastructure *candidate*, not a go-live authorization. The
+local Gate 4 revalidation has passed; final status also requires a successful
+GitHub Actions run for the exact pushed commit. The original Caddy and pypdf
+HIGH findings were remediated and all four final runtime images scanned at
+zero CRITICAL/HIGH. See [the Caddy remediation evidence](gate4-caddy-remediation.md).
+Do not expose this stack to the public Internet. No VPS,
 DNS, firewall, public certificate, production secret or customer data was
 created or changed during this gate. The isolated local test uses synthetic
 tenants and a Caddy local CA. A real deployment requires the remaining gates,
@@ -34,9 +37,10 @@ commit pinned in `uv.lock`. Neither source nor an SSH key is copied into this
 public repository or published as an image artifact.
 
 `docker-compose.prod.yml` is intentionally separate from the development
-Compose file. Do not combine the two. The service images and base images are
-pinned; production application images are built locally and never implicitly
-pulled. The Postgres service derives from a pinned official image but starts
+Compose file. Do not combine the two. Builder/base images are digest-pinned;
+application and Caddy images are built locally and never implicitly pulled.
+A final registry digest would require separate private publication/change
+control. The Postgres service derives from a pinned official image but starts
 as UID 70 and removes the unused, vulnerable `gosu` privilege-switch binary.
 It expects a fresh Docker named volume initialized with that ownership, not
 an arbitrary pre-existing host bind mount. Caddy stores certificates in
@@ -94,8 +98,8 @@ docker compose --env-file /path/outside/repo/.env.production -f docker-compose.p
 ```
 
 These commands are a future operator runbook, **not** permission to deploy the
-currently blocked Caddy image. Before a VPS is eligible, replace and rescan
-the affected pinned image and rerun the complete smoke/CI checks.
+local candidate. Before a VPS is eligible, scan its actual final images and
+rerun the complete smoke/CI checks.
 
 Take and **restore-test** a database backup before *any* migration on a
 nonempty database. Gate 6 has not supplied this procedure, so an existing
@@ -154,17 +158,35 @@ and secrets can yield inconsistent or unreadable jobs; the recovery plan must
 cover that set. Caddy certificate volume should also be preserved. None of
 these real restore actions was attempted in Gate 4.
 
-## Known blockers to production
+## Security revalidation and remaining production blockers
 
-- A fresh Trivy 0.74.0 scan of the Caddy image found **17 HIGH findings**
-  (zero secret findings) in its Go binary, including `x/crypto`, `x/net`,
-  `x/text`, gRPC and Go standard library. This is the Internet-facing service;
-  the findings cannot be dismissed solely because the base OS has no HIGH
-  finding. The latest stable upstream release checked on 2026-10-01 is
-  Caddy 2.11.4. Wait for a tested patched upstream image, or obtain explicit
-  approval for a separately reviewed replacement/rebuild; do not silently
-  ship a custom dependency fork. The app, derived Postgres and migrator
-  images each scanned with zero CRITICAL/HIGH and zero secret findings.
+- The original official Caddy binary had **17 HIGH findings**. The custom
+  rebuild of the same official Caddy 2.11.4 source with patched Go modules
+  scanned at **zero CRITICAL/HIGH** and passed the local TLS/topology smoke;
+  [the separate evidence](gate4-caddy-remediation.md) records every advisory,
+  source checksum, image ID and residual MEDIUM/LOW items. It is not a
+  released or deployed artifact solely because of this local test.
+- The pre-update application image had three HIGH pypdf 6.18.1 advisories:
+  `CVE-2026-102998` (form-field denial of service), `CVE-2026-102999`
+  (embedded-file denial of service) and `CVE-2026-103000` (page-label denial
+  of service). Trivy reported 6.19.0 as the fixed version for each. The
+  minimum requirement is now `pypdf>=6.19.0` and `uv.lock` pins 6.19.0;
+  no other locked package version changed. The fresh application image
+  confirmed 6.19.0 at runtime and retained the proprietary extractor at
+  `ddb485ff76627f2e995b11d2b4d11325fc5628c9`. Its all-severity scan
+  found **0 CRITICAL, 0 HIGH, 16 MEDIUM, 8 LOW, 0 secrets**. The MEDIUM
+  records are 13 in `libc6`, two in `zlib1g` and one in `libgcc-s1`;
+  the eight LOW records are in `libc6`. The scanner reported no fixed
+  package version for these residual Debian findings. Caddy had 5 MEDIUM,
+  4 LOW and 1 UNKNOWN; Postgres and migrator had no vulnerability or secret
+  findings in this scan. Track and reassess these residuals against later
+  vulnerability DB and base-image updates; no waiver for a future HIGH.
+- The fresh, localhost-only synthetic stack passed two migration runs,
+  HTTPS certificate validation, `/health`, `/readiness`, extraction, tenant
+  isolation, a 23 MiB upload rejection (HTTP 413), and persistence of jobs
+  and the Caddy local CA after restarting Postgres, API, worker and Caddy.
+  All four services were healthy. The 79 tests passed with zero skips. These
+  are local findings; the exact-commit CI run remains a separate release gate.
 - No real DNS/ACME issuance, VPS hardening, external firewall or load test.
 - Host hardening is an operator prerequisite: SSH key authentication, restrict
   administrative SSH source IPs, disable password authentication after access

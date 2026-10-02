@@ -193,6 +193,39 @@ jobs:
           sudo chmod 400 "$PAPELA_PG_ADMIN_PASSWORD_FILE" "$PAPELA_PG_RUNTIME_PASSWORD_FILE" "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE"
           docker compose -f docker-compose.prod.yml config --quiet
           docker compose -f docker-compose.prod.yml build caddy migrate postgres
+          # Scan each final Gate 4 runtime before starting the synthetic stack.
+          # No image or scan report is uploaded: they may reveal private code.
+          for component in caddy migrate postgres; do
+            image="papela-${component}:gate4"
+            docker save --output "$RUNNER_TEMP/${component}-gate4.tar" "$image"
+            docker run --rm \
+              --mount "type=bind,source=$RUNNER_TEMP,target=/scan" \
+              aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+              image --input "/scan/${component}-gate4.tar" \
+              --cache-dir /scan/trivy-cache --scanners vuln,secret \
+              --severity CRITICAL,HIGH --format json \
+              --output "/scan/${component}-gate4-scan.json" --timeout 5m --quiet
+            python - "$RUNNER_TEMP/${component}-gate4-scan.json" "$component" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              report = json.load(handle)
+          results = report.get("Results") or []
+          assert results, f"{sys.argv[2]} scan produced no targets"
+          severe = sum(
+              finding.get("Severity") in {"CRITICAL", "HIGH"}
+              for result in results
+              for finding in (result.get("Vulnerabilities") or [])
+          )
+          secrets = sum(len(result.get("Secrets") or []) for result in results)
+          assert severe == 0 and secrets == 0, (
+              f"{sys.argv[2]} scan blocked: {severe} severe advisories, "
+              f"{secrets} secret findings"
+          )
+          print(f"{sys.argv[2]} scan PASS: zero CRITICAL/HIGH and zero secrets")
+          PY
+            rm -f "$RUNNER_TEMP/${component}-gate4.tar" "$RUNNER_TEMP/${component}-gate4-scan.json"
+          done
           docker compose -f docker-compose.prod.yml up --detach --wait --wait-timeout 120 postgres
           docker compose -f docker-compose.prod.yml --profile ops run --rm migrate
           docker compose -f docker-compose.prod.yml --profile ops run --rm migrate
