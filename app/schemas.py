@@ -27,4 +27,5 @@ class JobStatus(BaseModel):
 
 class ErrorResponse(BaseModel):
     request_id: str
+    code: str
     error: str

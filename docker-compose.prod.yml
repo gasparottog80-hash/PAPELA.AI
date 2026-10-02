@@ -12,9 +12,33 @@ x-app-env: &app-env
   PAPELA_DB_POOL_MAX: "5"
   PAPELA_MAX_STORAGE_BYTES: ${PAPELA_MAX_STORAGE_BYTES:?set a PDF quota}
 
+# Docker rotates stdout/stderr; no document or credential is written to a
+# separate log volume. Operators set retention according to their policy.
+x-log-rotation: &log-rotation
+  driver: json-file
+  options:
+    max-size: ${PAPELA_LOG_MAX_SIZE:-10m}
+    max-file: ${PAPELA_LOG_MAX_FILES:-3}
+
 services:
   postgres:
+    logging: *log-rotation
     image: papela-postgres:gate4
+    # The migrator issues a password-bearing ALTER ROLE statement. PostgreSQL
+    # defaults can log failed statements; suppress statement/parameter/detail
+    # logging so neither credentials nor row values enter container logs.
+    command:
+      - postgres
+      - -c
+      - log_min_error_statement=PANIC
+      - -c
+      - log_min_messages=FATAL
+      - -c
+      - log_parameter_max_length_on_error=0
+      - -c
+      - log_statement=none
+      - -c
+      - log_error_verbosity=terse
     build:
       context: .
       dockerfile: Dockerfile.postgres
@@ -47,6 +71,7 @@ services:
       start_period: 20s
 
   migrate:
+    logging: *log-rotation
     profiles: [ops]
     image: papela-migrate:gate4
     build:
@@ -74,6 +99,7 @@ services:
     pids_limit: 64
 
   api:
+    logging: *log-rotation
     image: ${PAPELA_APP_IMAGE:?build a private local application image first}
     pull_policy: never
     restart: unless-stopped
@@ -111,6 +137,7 @@ services:
       start_period: 20s
 
   worker:
+    logging: *log-rotation
     image: ${PAPELA_APP_IMAGE:?build a private local application image first}
     pull_policy: never
     command: ["python", "-m", "app.worker"]
@@ -146,6 +173,7 @@ services:
       start_period: 30s
 
   caddy:
+    logging: *log-rotation
     image: papela-caddy:gate4
     build:
       context: .

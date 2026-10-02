@@ -8,6 +8,13 @@ from types import FrameType
 
 from .config import Settings, get_settings
 from .db import Database
+from .error_codes import (
+    DB_UNAVAILABLE,
+    INTERNAL_ERROR,
+    PROCESSING_TIMEOUT,
+    code_for_exception,
+)
+from .metrics import METRICS, start_metrics_server
 from .processing import bounded_process
 from .repository import JobRepository
 from .sanitize import sanitize_error
@@ -36,28 +43,41 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
         return False
 
     job_id = str(job["id"])
-    logger.info("job.claimed", extra={"request_id": job_id})
+    attempt = int(job["attempts"]) + 1
+    started_at = time.monotonic()
+    outcome = "failed"
+    logger.info("job.claimed", extra={"job_id": job_id, "attempt": attempt})
     try:
+        logger.info("job.started", extra={"job_id": job_id, "attempt": attempt})
         path = get_pdf_path(job_id, settings.storage_dir)
         if Path(job["storage_path"]).resolve() != Path(path):
             raise ValueError("unsafe job storage path")
         result = bounded_process("ocr", path, settings)
         # 1) Persist the result first (data safety).
         repo.mark_done(job_id, result)
+        METRICS.inc("jobs_completed_total")
+        outcome = "done"
         # 2) Then drop the raw PDF (data minimization). If we crash between
         #    (1) and (2) the job is already done; the retention sweep reclaims
         #    the orphan file later. No sensitive-doc-without-result window.
         if settings.purge_after_done:
             delete_pdf(job_id, settings.storage_dir, reason="purge-after-done")
             repo.mark_purged(job_id)
-        logger.info("job.done", extra={"request_id": job_id})
+        logger.info(
+            "job.done",
+            extra={
+                "job_id": job_id,
+                "attempt": attempt,
+                "duration_ms": (time.monotonic() - started_at) * 1000,
+            },
+        )
     except Exception as exc:  # noqa: BLE001 - isolate per-job failure
         # LGPD: log the sanitized category, never the raw exception (may carry
         # document content). exc_info is intentionally omitted here.
-        logger.error(
-            "job.failed",
-            extra={"request_id": job_id, "error": sanitize_error(exc)},
-        )
+        error_code = code_for_exception(exc)
+        if error_code == DB_UNAVAILABLE:
+            METRICS.inc("db_errors_total", "worker")
+        duration_ms = (time.monotonic() - started_at) * 1000
         # A cleanup failure after mark_done must not requeue an already persisted
         # result. The retention sweep will retry deletion with purged_at still NULL.
         row = repo.get_internal(job_id)
@@ -66,9 +86,66 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
                 job_id, sanitize_error(exc), max_attempts=settings.max_attempts
             )
             row = repo.get_internal(job_id)
+            if error_code == PROCESSING_TIMEOUT:
+                logger.warning(
+                    "job.timeout",
+                    extra={
+                        "job_id": job_id,
+                        "attempt": attempt,
+                        "error_code": error_code,
+                    },
+                )
+            if row is not None and row["status"] == "pending":
+                outcome = "retry"
+                METRICS.inc("jobs_retried_total")
+                logger.warning(
+                    "job.retry",
+                    extra={
+                        "job_id": job_id, "attempt": attempt,
+                        "duration_ms": duration_ms, "error_code": error_code,
+                        "error": sanitize_error(exc),
+                    },
+                )
+            elif row is not None and row["status"] == "failed":
+                METRICS.inc("jobs_failed_total")
+                logger.error(
+                    "job.failed",
+                    extra={
+                        "job_id": job_id, "attempt": attempt,
+                        "duration_ms": duration_ms, "error_code": error_code,
+                        "error": sanitize_error(exc),
+                    },
+                )
+        elif row is not None and row["status"] == "done":
+            outcome = "cleanup_failed"
+            logger.error(
+                "job.cleanup_failed",
+                extra={
+                    "job_id": job_id, "attempt": attempt,
+                    "duration_ms": duration_ms, "error_code": error_code,
+                    "error": sanitize_error(exc),
+                },
+            )
         if row is not None and row["status"] == "failed":
-            delete_pdf(job_id, settings.storage_dir, reason="terminal-failure")
-            repo.mark_purged(job_id)
+            try:
+                delete_pdf(job_id, settings.storage_dir, reason="terminal-failure")
+                repo.mark_purged(job_id)
+            except Exception as cleanup_exc:
+                logger.error(
+                    "job.cleanup_failed",
+                    extra={
+                        "job_id": job_id, "attempt": attempt,
+                        "error_code": code_for_exception(cleanup_exc),
+                        "error": sanitize_error(cleanup_exc),
+                    },
+                )
+                raise
+    finally:
+        METRICS.observe(
+            "job_processing_duration_seconds",
+            time.monotonic() - started_at,
+            outcome,
+        )
     return True
 
 
@@ -76,24 +153,38 @@ def run() -> None:
     settings = get_settings()
     from .logging_config import configure_logging
 
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, "worker")
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
     db = Database(settings)
-    db.open()
+    try:
+        db.open()
+    except Exception:
+        METRICS.inc("db_errors_total", "startup")
+        raise
     repo = JobRepository(db.pool)
+    try:
+        metrics_server = start_metrics_server(METRICS, worker=True)
+    except Exception:
+        db.close()
+        raise
     logger.info("worker.started", extra={"request_id": None})
 
     idle_backoff = 0.5
     last_sweep = 0.0
+    last_heartbeat_log = 0.0
     heartbeat = Path("/tmp/papela-worker-heartbeat")
     try:
         while _running:
             # The container probe detects a stalled loop, not just a live PID.
             heartbeat.touch()
+            METRICS.heartbeat()
             now = time.monotonic()
+            if now - last_heartbeat_log >= 60:
+                logger.info("worker.heartbeat")
+                last_heartbeat_log = now
             # Periodic maintenance: reap stalled jobs + LGPD retention sweep.
             if now - last_sweep >= settings.purge_interval_s:
                 try:
@@ -102,9 +193,12 @@ def run() -> None:
                         max_attempts=settings.max_attempts,
                     )
                     if reaped:
-                        logger.warning("jobs.reaped", extra={"request_id": None})
+                        METRICS.inc("jobs_reaped_total", amount=reaped)
+                        logger.warning("jobs.reaped", extra={"count": reaped})
                 except Exception:  # noqa: BLE001 - maintenance must not kill worker
-                    logger.exception("reaper.failed", extra={"request_id": None})
+                    logger.exception(
+                        "reaper.failed", extra={"error_code": INTERNAL_ERROR}
+                    )
                 try:
                     n = purge_expired_jobs(
                         repo,
@@ -112,10 +206,11 @@ def run() -> None:
                         retention_days=settings.retention_days,
                     )
                     if n:
-                        logger.info("retention.purged", extra={"request_id": None})
+                        logger.info("retention.purged", extra={"count": n})
                 except Exception:  # noqa: BLE001 - sweep must never kill worker
                     logger.exception(
-                        "retention.sweep_failed", extra={"request_id": None}
+                        "retention.sweep_failed",
+                        extra={"error_code": INTERNAL_ERROR},
                     )
                 last_sweep = now
 
@@ -123,6 +218,8 @@ def run() -> None:
             if not did_work:
                 time.sleep(idle_backoff)
     finally:
+        metrics_server.shutdown()
+        metrics_server.server_close()
         db.close()
         logger.info("worker.stopped", extra={"request_id": None})
 

@@ -8,6 +8,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from .config import get_settings
+from .error_codes import STORAGE_UNAVAILABLE
 from .processing import bounded_process
 
 logger = logging.getLogger("papela.storage")
@@ -124,12 +125,16 @@ def delete_pdf(job_id: str, storage_dir: str, *, reason: str) -> bool:
     except OSError:
         logger.exception(
             "pdf.delete_failed",
-            extra={"request_id": job_id},
+            extra={
+                "job_id": job_id,
+                "cleanup_reason": reason,
+                "error_code": STORAGE_UNAVAILABLE,
+            },
         )
         raise
     logger.info(
         "pdf.deleted" if removed else "pdf.delete_noop",
-        extra={"request_id": job_id},
+        extra={"job_id": job_id, "cleanup_reason": reason},
     )
     return removed
 

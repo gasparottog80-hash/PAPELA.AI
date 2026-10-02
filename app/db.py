@@ -6,6 +6,7 @@ from importlib.resources import files
 from psycopg_pool import ConnectionPool
 
 from .config import Settings
+from .metrics import METRICS
 
 logger = logging.getLogger("papela.db")
 
@@ -136,6 +137,7 @@ class Database:
             with self._pool.connection(timeout=2.0) as conn:
                 return conn.execute("SELECT 1").fetchone() == (1,)
         except Exception:
+            METRICS.inc("db_errors_total", "readiness")
             return False
 
     @property

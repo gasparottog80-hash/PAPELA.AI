@@ -236,6 +236,32 @@ jobs:
           docker compose -f docker-compose.prod.yml restart postgres api worker caddy
           docker compose -f docker-compose.prod.yml up --detach --wait --wait-timeout 120 api worker caddy
           uv run --no-sync python scripts/smoke_production_local.py after --port 18443 --ca "$RUNNER_TEMP/papela-gate4-root.crt" --job-id "$job_id"
+          # The Prometheus text endpoints exist only on each container's
+          # loopback interface; neither Compose nor Caddy publishes port 9100.
+          docker exec papela-gate4-ci-api-1 python -c 'import re,urllib.request; body=urllib.request.urlopen("http://127.0.0.1:9100/metrics", timeout=3).read().decode(); assert re.search(r"^jobs_created_total [1-9]", body, re.M) and "requests_total" in body'
+          docker exec papela-gate4-ci-worker-1 python -c 'import re,urllib.request; body=urllib.request.urlopen("http://127.0.0.1:9100/metrics", timeout=3).read().decode(); assert re.search(r"^jobs_completed_total [1-9]", body, re.M) and re.search(r"^worker_heartbeat_age_seconds [0-9]", body, re.M)'
+          uv run --no-sync python - "$RUNNER_TEMP/papela-gate4-root.crt" <<'PY'
+          import httpx
+          import sys
+          with httpx.Client(verify=sys.argv[1], trust_env=False) as client:
+              response = client.get(
+                  "https://localhost:18443/health?token=gate5-ci-canary",
+                  headers={"Authorization": "gate5-ci-canary"},
+              )
+              assert response.status_code == 200
+          PY
+          if docker logs papela-gate4-ci-caddy-1 2>&1 | grep -q 'gate5-ci-canary'; then
+            echo '::error::Sensitive canary appeared in Caddy logs'
+            exit 1
+          fi
+          if docker exec papela-gate4-ci-postgres-1 psql -X -q -U papela_owner -d papela -c 'SELECT gate5_pg_canary_nonexistent' >/dev/null 2>&1; then
+            echo '::error::Expected synthetic SQL failure did not occur'
+            exit 1
+          fi
+          if docker logs papela-gate4-ci-postgres-1 2>&1 | grep -q 'gate5_pg_canary_nonexistent'; then
+            echo '::error::Sensitive SQL canary appeared in Postgres logs'
+            exit 1
+          fi
 
       - name: Remove Gate 4 synthetic stack and credentials
         if: ${{ always() }}

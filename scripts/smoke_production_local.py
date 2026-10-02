@@ -10,6 +10,7 @@ import argparse
 import io
 import time
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import httpx
 from pypdf import PdfWriter
@@ -77,11 +78,21 @@ def main() -> None:
     ) as client:
         health = client.get("/health")
         assert health.status_code == 200
+        assert str(UUID(health.headers["x-request-id"])) == health.headers[
+            "x-request-id"
+        ]
+        supplied_id = str(uuid4())
+        assert client.get(
+            "/health", headers={"X-Request-ID": supplied_id}
+        ).headers["x-request-id"] == supplied_id
         assert health.headers["strict-transport-security"] == "max-age=31536000"
         assert health.headers["x-content-type-options"] == "nosniff"
         assert health.headers["cache-control"] == "no-store"
         assert client.get("/readiness").json() == {"status": "ready"}
-        assert client.post("/v1/upload").status_code == 401
+        unauthorized = client.post("/v1/upload")
+        assert unauthorized.status_code == 401
+        assert unauthorized.json()["code"] == "AUTH_INVALID"
+        assert client.get("/metrics").status_code == 404
         if args.phase == "before":
             response = client.post(
                 "/v1/upload",

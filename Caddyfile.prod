@@ -5,6 +5,13 @@
 	log {
 		format filter {
 			request>headers delete
+			request>uri delete
+			request>host delete
+			request>remote_ip delete
+			request>client_ip delete
+			request>remote_port delete
+			resp_headers delete
+			wrap json
 		}
 	}
 	servers {
@@ -19,6 +26,21 @@
 }
 
 {$PAPELA_DOMAIN} {
+	# Access logs retain status/duration/method, but not request targets,
+	# credentials, IPs or response headers. API logs use safe route names.
+	log {
+		output stdout
+		format filter {
+			request>headers delete
+			request>uri delete
+			request>host delete
+			request>remote_ip delete
+			request>client_ip delete
+			request>remote_port delete
+			resp_headers delete
+			wrap json
+		}
+	}
 	request_body {
 		max_size 22MiB
 	}

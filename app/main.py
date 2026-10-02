@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,7 +18,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import get_settings
 from .db import Database
+from .error_codes import (
+    HTTP_ERROR_CODES,
+    INVALID_PDF,
+    INVALID_REQUEST,
+    JOB_NOT_FOUND,
+    STORAGE_UNAVAILABLE,
+    UPLOAD_TOO_LARGE,
+)
 from .http_security import SecurityBoundary
+from .metrics import METRICS, start_metrics_server
 from .repository import JobRepository
 from .schemas import ErrorResponse, JobStatus, UploadAccepted
 from .security import RateLimiter, require_api_key
@@ -37,7 +47,7 @@ async def lifespan(app: FastAPI):
     from .logging_config import configure_logging
 
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, "api")
 
     # A legacy shared-key list has no per-customer owner. Production only
     # accepts an explicit, unique tenant-to-key mapping.
@@ -67,14 +77,25 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("Production requires raw-PDF purge after completion")
 
     db = Database(settings)
-    db.open()
+    try:
+        db.open()
+    except Exception:
+        METRICS.inc("db_errors_total", "startup")
+        raise
     app.state.db = db
     app.state.repo = JobRepository(db.pool)
     app.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
+    try:
+        metrics_server = start_metrics_server(METRICS)
+    except Exception:
+        db.close()
+        raise
     logger.info("startup", extra={"request_id": None})
     try:
         yield
     finally:
+        metrics_server.shutdown()
+        metrics_server.server_close()
         db.close()
         logger.info("shutdown", extra={"request_id": None})
 
@@ -104,10 +125,14 @@ async def http_error(request: Request, exc: HTTPException):
         409: "job is not terminal",
         413: "request too large",
     }
+    code = HTTP_ERROR_CODES.get(exc.status_code, INVALID_REQUEST)
+    if exc.status_code == 404 and not request.url.path.startswith("/v1/jobs/"):
+        code = INVALID_REQUEST
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "request_id": request.state.request_id,
+            "code": code,
             "error": messages.get(exc.status_code, "request rejected"),
         },
     )
@@ -120,6 +145,7 @@ async def validation_error(request: Request, exc: RequestValidationError):
         status_code=422,
         content={
             "request_id": request.state.request_id,
+            "code": INVALID_REQUEST,
             "error": "invalid request",
         },
     )
@@ -163,12 +189,20 @@ async def upload(
 ):
     settings = get_settings()
     request_id: str = request.state.request_id
+    started_at = time.monotonic()
 
     if file.content_type not in ("application/pdf", "application/octet-stream"):
+        METRICS.inc("uploads_rejected_total", "invalid_pdf")
+        logger.warning(
+            "upload.rejected",
+            extra={"request_id": request_id, "error_code": INVALID_PDF},
+        )
         return JSONResponse(
             status_code=400,
             content=ErrorResponse(
-                request_id=request_id, error="content-type must be application/pdf"
+                request_id=request_id,
+                code=INVALID_PDF,
+                error="content-type must be application/pdf",
             ).model_dump(),
         )
 
@@ -183,10 +217,24 @@ async def upload(
             max_pages=settings.max_pdf_pages,
         )
     except InvalidPdfError as exc:
-        logger.warning("upload.rejected", extra={"request_id": request_id})
+        error_code = (
+            UPLOAD_TOO_LARGE if exc.status_code == 413 else
+            STORAGE_UNAVAILABLE if exc.status_code == 507 else INVALID_PDF
+        )
+        METRICS.inc(
+            "uploads_rejected_total",
+            "too_large" if exc.status_code == 413 else
+            "storage" if exc.status_code == 507 else "invalid_pdf",
+        )
+        logger.warning(
+            "upload.rejected",
+            extra={"request_id": request_id, "error_code": error_code},
+        )
         return JSONResponse(
             status_code=exc.status_code,
-            content=ErrorResponse(request_id=request_id, error=str(exc)).model_dump(),
+            content=ErrorResponse(
+                request_id=request_id, code=error_code, error=str(exc)
+            ).model_dump(),
         )
 
     try:
@@ -201,7 +249,15 @@ async def upload(
     except Exception:
         delete_pdf(job_id, settings.storage_dir, reason="create-failed")
         raise
-    logger.info("upload.accepted", extra={"request_id": job_id})
+    METRICS.inc("jobs_created_total")
+    logger.info(
+        "upload.accepted",
+        extra={
+            "request_id": request_id,
+            "job_id": job_id,
+            "duration_ms": (time.monotonic() - started_at) * 1000,
+        },
+    )
     return UploadAccepted(job_id=job_id, status="pending", pages=pages)
 
 
@@ -221,7 +277,9 @@ async def get_job(
         return JSONResponse(
             status_code=404,
             content=ErrorResponse(
-                request_id=request.state.request_id, error="job not found"
+                request_id=request.state.request_id,
+                code=JOB_NOT_FOUND,
+                error="job not found",
             ).model_dump(),
         )
     return JobStatus(**row)
@@ -245,7 +303,9 @@ async def get_job_audit(
         return JSONResponse(
             status_code=404,
             content=ErrorResponse(
-                request_id=request.state.request_id, error="job not found"
+                request_id=request.state.request_id,
+                code=JOB_NOT_FOUND,
+                error="job not found",
             ).model_dump(),
         )
     settings = get_settings()
