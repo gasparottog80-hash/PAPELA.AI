@@ -27,6 +27,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_FILES = (
+    "ops/migrate.sh",
     "ops/0000_lock.sql",
     "app/migrations/0001_initial.sql",
     "app/migrations/0002_tenant_isolation.sql",
@@ -87,16 +88,34 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def schema_fingerprint() -> str:
+def git_blob(commit: str, name: str) -> bytes:
+    if not SHA.fullmatch(commit) or name not in (*SCHEMA_FILES, "uv.lock"):
+        raise ReleaseError("RELEASE_SOURCE_INVALID")
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{name}"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise ReleaseError("RELEASE_SOURCE_MISSING")
+    return result.stdout
+
+
+def schema_fingerprint(commit: str | None = None) -> str:
     digest = hashlib.sha256()
     for name in SCHEMA_FILES:
         digest.update(name.encode("ascii") + b"\0")
-        digest.update((ROOT / name).read_bytes())
+        content = git_blob(commit, name) if commit else (ROOT / name).read_bytes()
+        digest.update(content.replace(b"\r\n", b"\n"))
     return digest.hexdigest()
 
 
-def extractor_commit() -> str:
-    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+def extractor_commit(commit: str | None = None) -> str:
+    lock_bytes = (
+        git_blob(commit, "uv.lock") if commit else (ROOT / "uv.lock").read_bytes()
+    )
+    lock = tomllib.loads(lock_bytes.decode("utf-8"))
     package = next(p for p in lock["package"] if p["name"] == "papela-fiscal-extractor")
     commit = package["source"]["git"].rsplit("#", 1)[-1]
     if not SHA.fullmatch(commit):
@@ -124,6 +143,7 @@ def scan_image(tag: str) -> dict[str, int]:
             "docker",
             "run",
             "--rm",
+            *(["--user", f"{os.getuid()}:{os.getgid()}"] if os.name != "nt" else []),
             "--mount",
             f"type=bind,source={tmp},target=/scan",
             SCANNER,
@@ -191,7 +211,9 @@ def read_json(path: Path) -> dict[str, Any]:
 
 @contextlib.contextmanager
 def exclusive_lock(directory: Path) -> Iterator[None]:
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name != "nt" and directory.stat().st_mode & 0o077:
+        raise ReleaseError("RELEASE_STATE_PERMISSIONS")
     lock = directory / "deploy.lock"
     with lock.open("a+b") as handle:
         try:
@@ -319,7 +341,7 @@ def ci_green(commit: str) -> None:
         raise ReleaseError("CI_NOT_GREEN")
 
 
-def validate_manifest(manifest: dict[str, Any], *, target: bool = True) -> None:
+def validate_manifest(manifest: dict[str, Any]) -> None:
     commit = manifest.get("commit_sha")
     if not isinstance(commit, str) or not SHA.fullmatch(commit):
         raise ReleaseError("RELEASE_SHA_INVALID")
@@ -329,11 +351,10 @@ def validate_manifest(manifest: dict[str, Any], *, target: bool = True) -> None:
     image_id, label = image_details(tag)
     if image_id != manifest.get("image_id") or label != commit:
         raise ReleaseError("IMAGE_PROVENANCE_MISMATCH")
-    if target:
-        if manifest.get("extractor_commit") != extractor_commit():
-            raise ReleaseError("EXTRACTOR_PROVENANCE_MISMATCH")
-        if manifest.get("schema_fingerprint") != schema_fingerprint():
-            raise ReleaseError("SCHEMA_FINGERPRINT_MISMATCH")
+    if manifest.get("extractor_commit") != extractor_commit(commit):
+        raise ReleaseError("EXTRACTOR_PROVENANCE_MISMATCH")
+    if manifest.get("schema_fingerprint") != schema_fingerprint(commit):
+        raise ReleaseError("SCHEMA_FINGERPRINT_MISMATCH")
     if manifest.get("scan") != {"critical_high": 0, "secrets": 0}:
         raise ReleaseError("SCAN_ATTESTATION_INVALID")
 
@@ -367,6 +388,11 @@ def preflight(
     args: argparse.Namespace, manifest: dict[str, Any]
 ) -> dict[str, Any] | None:
     validate_manifest(manifest)
+    if not args.synthetic:
+        if run("git", "rev-parse", "HEAD") != manifest["commit_sha"]:
+            raise ReleaseError("CHECKOUT_COMMIT_MISMATCH")
+        if run("git", "status", "--porcelain"):
+            raise ReleaseError("CHECKOUT_NOT_CLEAN")
     values = env_file(args.env_file)
     for name in (
         "PAPELA_PG_ADMIN_PASSWORD_FILE",
@@ -381,9 +407,12 @@ def preflight(
             raise ReleaseError("SECRET_FILE_PERMISSIONS")
     if not args.smoke_key_file.is_file():
         raise ReleaseError("SMOKE_KEY_MISSING")
+    if os.name != "nt" and args.smoke_key_file.stat().st_mode & 0o077:
+        raise ReleaseError("SMOKE_KEY_PERMISSIONS")
     if shutil.disk_usage(Path(values["PAPELA_BACKUP_DIR"])).free < 512 * 1024 * 1024:
         raise ReleaseError("DISK_SPACE_LOW")
     current = active(args.state_dir)
+    previous: dict[str, Any] | None = None
     if current is None and not args.initial:
         raise ReleaseError("CURRENT_RELEASE_UNKNOWN")
     if current is None and args.initial:
@@ -392,7 +421,7 @@ def preflight(
                 raise ReleaseError("INITIAL_DEPLOY_FOUND_EXISTING_SERVICE")
     if current is not None:
         previous = read_json(manifest_path(args.state_dir, current["commit_sha"]))
-        validate_manifest(previous, target=False)
+        validate_manifest(previous)
         if values.get("PAPELA_APP_IMAGE") != previous["image_tag"]:
             raise ReleaseError("ACTIVE_ENV_IMAGE_DRIFT")
         if previous["schema_fingerprint"] != manifest["schema_fingerprint"]:
@@ -426,7 +455,7 @@ def preflight(
         raise ReleaseError("SYNTHETIC_SCOPE_INVALID")
     compose(args, manifest["image_tag"], "config", "--quiet")
     backup_verified(args, manifest["image_tag"])
-    return current
+    return previous
 
 
 def readiness(args: argparse.Namespace) -> None:
@@ -524,7 +553,7 @@ def record(args: argparse.Namespace) -> None:
                 "scripts/verify_extractor.py",
             )
         )
-        if provenance.get("installed_commit") != extractor_commit():
+        if provenance.get("installed_commit") != extractor_commit(commit):
             raise ReleaseError("EXTRACTOR_PROVENANCE_MISMATCH")
         scan = scan_image(tag)
         manifest = {
@@ -533,8 +562,8 @@ def record(args: argparse.Namespace) -> None:
             "image_id": image_id,
             "registry_digest": None,
             "created_at_utc": utc(),
-            "extractor_commit": extractor_commit(),
-            "schema_fingerprint": schema_fingerprint(),
+            "extractor_commit": extractor_commit(commit),
+            "schema_fingerprint": schema_fingerprint(commit),
             "scan": scan,
             "migration_applied": False,
             "backup_id": None,
@@ -562,6 +591,8 @@ def deploy(args: argparse.Namespace) -> None:
                 or previous["schema_fingerprint"] != manifest["schema_fingerprint"]
             )
             if migration_needed:
+                if schema_fingerprint() != manifest["schema_fingerprint"]:
+                    raise ReleaseError("MIGRATOR_CHECKOUT_MISMATCH")
                 event("migration_started", args.commit)
                 try:
                     compose(
@@ -636,7 +667,7 @@ def rollback_to(args: argparse.Namespace, previous: dict[str, Any]) -> None:
     commit = previous["commit_sha"]
     event("rollback_started", commit)
     try:
-        validate_manifest(previous, target=False)
+        validate_manifest(previous)
         compose(
             args,
             previous["image_tag"],

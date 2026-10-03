@@ -24,6 +24,9 @@ def test_canary_pdf_is_parseable_and_has_expected_text() -> None:
 def test_schema_fingerprint_is_stable_and_extractor_is_locked() -> None:
     assert len(release.schema_fingerprint()) == 64
     assert release.extractor_commit() == "ddb485ff76627f2e995b11d2b4d11325fc5628c9"
+    head = release.run("git", "rev-parse", "HEAD")
+    assert release.schema_fingerprint(head) == release.schema_fingerprint()
+    assert release.extractor_commit(head) == release.extractor_commit()
 
 
 def test_lock_fails_fast_for_parallel_release(tmp_path: Path) -> None:
@@ -79,3 +82,59 @@ def test_release_manifest_has_no_secret_material(tmp_path: Path) -> None:
     release.write_json(path, manifest)
     assert json.loads(path.read_text(encoding="utf-8")) == manifest
     assert "password" not in path.read_text(encoding="utf-8").lower()
+
+
+def test_preflight_returns_full_previous_release_not_active_pointer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    previous_commit = "a" * 40
+    previous = {
+        "commit_sha": previous_commit,
+        "image_tag": f"papelaai:sha-{previous_commit}",
+        "schema_fingerprint": "same-schema",
+    }
+    release.write_json(release.manifest_path(tmp_path, previous_commit), previous)
+    release.write_json(tmp_path / "active.json", {"commit_sha": previous_commit})
+    secret = tmp_path / "synthetic.key"
+    secret.write_text("synthetic-only", encoding="utf-8")
+    secret.chmod(0o600)
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    env = tmp_path / ".env.synthetic"
+    env.write_text(
+        "".join(
+            f"{name}={secret}\n"
+            for name in (
+                "PAPELA_PG_ADMIN_PASSWORD_FILE",
+                "PAPELA_PG_RUNTIME_PASSWORD_FILE",
+                "PAPELA_DATABASE_URL_FILE",
+                "PAPELA_TENANT_API_KEYS_FILE",
+            )
+        )
+        + f"PAPELA_BACKUP_DIR={backup_dir}\n"
+        + f"PAPELA_APP_IMAGE={previous['image_tag']}\n"
+        + "PAPELA_PROJECT_NAME=papela-gate7-ci\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release, "validate_manifest", lambda *a, **kw: None)
+    monkeypatch.setattr(release, "service_images", lambda *a: None)
+    monkeypatch.setattr(release, "readiness", lambda *a: None)
+    monkeypatch.setattr(release, "compose", lambda *a: "")
+    monkeypatch.setattr(release, "backup_verified", lambda *a: None)
+    monkeypatch.setattr(release.shutil, "disk_usage", lambda *a: Mock(free=10**10))
+    args = argparse.Namespace(
+        state_dir=tmp_path,
+        env_file=env,
+        smoke_key_file=secret,
+        smoke_url="https://localhost:18445",
+        initial=False,
+        migration_class="none",
+        migration_review=None,
+        synthetic=True,
+    )
+    target = {
+        "commit_sha": "b" * 40,
+        "image_tag": "unused",
+        "schema_fingerprint": "same-schema",
+    }
+    assert release.preflight(args, target) == previous

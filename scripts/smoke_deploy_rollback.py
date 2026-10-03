@@ -91,12 +91,12 @@ def main() -> None:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--base-env", type=Path)
     parser.add_argument("--database-url-file", type=Path)
-    parser.add_argument(
-        "--project", choices=("papela-gate7-local", "papela-gate7-ci"), required=True
-    )
+    parser.add_argument("--project", required=True)
     parser.add_argument("--http-port", type=int, default=18082)
     parser.add_argument("--https-port", type=int, default=18445)
     options = parser.parse_args()
+    if not re.fullmatch(r"papela-gate7-(?:ci|local(?:-[0-9]+)?)", options.project):
+        raise release.ReleaseError("SYNTHETIC_PROJECT_INVALID")
     for commit in (options.previous_commit, options.target_commit):
         if not release.SHA.fullmatch(commit):
             raise release.ReleaseError("SYNTHETIC_SHA_INVALID")
@@ -107,7 +107,7 @@ def main() -> None:
         raise release.ReleaseError("SYNTHETIC_PORT_INVALID")
     if options.state_dir.exists() and any(options.state_dir.iterdir()):
         raise release.ReleaseError("SYNTHETIC_STATE_NOT_EMPTY")
-    options.state_dir.mkdir(parents=True, exist_ok=True)
+    options.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     state = options.state_dir.resolve()
     values = (
         release.env_file(options.base_env)
@@ -143,6 +143,8 @@ def main() -> None:
         "".join(f"{key}={value}\n" for key, value in sorted(values.items())),
         encoding="utf-8",
     )
+    if os.name != "nt":
+        env_path.chmod(0o600)
     backup_dir = state / "backups"
     backup_dir.mkdir(mode=0o700)
     if os.name != "nt":

@@ -70,7 +70,7 @@ real preflight; never substitute a claim of green CI.
 
 ### Migrations and rollback boundary
 
-The fingerprint includes `0000_lock.sql`, `0001_initial.sql`,
+The fingerprint includes `migrate.sh`, `0000_lock.sql`, `0001_initial.sql`,
 `0002_tenant_isolation.sql`, and `010_runtime_role.sql` in fixed order. A
 same-fingerprint application upgrade **does not rerun migrations**. A first
 deployment needs explicit `--migration-class backward-compatible` after human

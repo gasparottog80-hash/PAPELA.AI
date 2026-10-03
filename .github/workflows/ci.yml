@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -100,7 +100,8 @@ jobs:
         env:
           DOCKER_BUILDKIT: '1'
         run: |
-          previous=$(git rev-parse HEAD^)
+          previous=d05185366eca70981d46334fd1f4b520c01cf81f
+          git merge-base --is-ancestor "$previous" HEAD
           [[ "$previous" =~ ^[0-9a-f]{40}$ ]]
           mkdir -p "$RUNNER_TEMP/papela-gate7-previous"
           git archive "$previous" | tar -x -C "$RUNNER_TEMP/papela-gate7-previous"
@@ -291,7 +292,7 @@ jobs:
       - name: Gate 7 isolated A to B to A deploy and rollback drill
         run: |
           uv run --no-sync python -m scripts.smoke_deploy_rollback \
-            --previous-commit "$(git rev-parse HEAD^)" \
+            --previous-commit d05185366eca70981d46334fd1f4b520c01cf81f \
             --target-commit "$GITHUB_SHA" \
             --state-dir "$RUNNER_TEMP/papela-gate7-drill" \
             --project papela-gate7-ci
