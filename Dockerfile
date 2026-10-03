@@ -70,6 +70,10 @@ RUN /usr/local/bin/python -m pip uninstall --yes pip setuptools wheel \
 
 FROM gcr.io/distroless/base-debian13@sha256:0896741ba5bafd3ac87ea025a5f578952f2d238ddc3614cb368acc983a687aa2 AS runtime
 
+# Build provenance is supplied by the release job; it never contains secrets.
+ARG RELEASE_COMMIT=unspecified
+LABEL org.opencontainers.image.revision="${RELEASE_COMMIT}"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     LD_LIBRARY_PATH="/usr/local/lib" \

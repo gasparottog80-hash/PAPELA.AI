@@ -8,7 +8,8 @@
 > limits are documented in [Gate 4](docs/gate4-production.md). The
 > [Gate 5 observability design](docs/gate5-observability.md) adds private
 > metrics and privacy-minimized logs. The [Gate 6 backup/restore runbook](docs/gate6-backup-restore.md)
-> covers logical database recovery. None of these gates is a go-live approval.
+> covers logical database recovery. The [Gate 7 release/rollback runbook](docs/gate7-deploy-rollback.md)
+> defines a localhost-only deploy drill. None of these gates is a go-live approval.
 
 On-premise fiscal-document pipeline. The safe MVP path extracts embedded text
 from digital PDFs; native PaddleOCR remains optional and is **not** permitted

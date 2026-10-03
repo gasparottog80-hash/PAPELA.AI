@@ -1,0 +1,7 @@
+# syntax=docker/dockerfile:1
+# Synthetic Gate 7 only: add a revision label to the already-built Gate 6 image.
+# Never use this wrapper to produce a production release.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG RELEASE_COMMIT
+LABEL org.opencontainers.image.revision="${RELEASE_COMMIT}"

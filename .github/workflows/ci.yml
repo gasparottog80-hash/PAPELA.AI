@@ -15,7 +15,7 @@ concurrency:
 jobs:
   baseline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -52,6 +52,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -90,8 +91,27 @@ jobs:
         env:
           DOCKER_BUILDKIT: '1'
         run: |
-          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" --tag papelaai-gate3-revalidated .
+          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" \
+            --build-arg "RELEASE_COMMIT=$GITHUB_SHA" \
+            --tag papelaai-gate3-revalidated --tag "papelaai:sha-$GITHUB_SHA" .
           docker run --rm --network none papelaai-gate3-revalidated python scripts/verify_extractor.py
+
+      - name: Build previous reviewed commit for isolated rollback drill
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          previous=$(git rev-parse HEAD^)
+          [[ "$previous" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p "$RUNNER_TEMP/papela-gate7-previous"
+          git archive "$previous" | tar -x -C "$RUNNER_TEMP/papela-gate7-previous"
+          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" \
+            --tag papelaai:gate7-previous-base "$RUNNER_TEMP/papela-gate7-previous"
+          docker build --no-cache -f ops/Dockerfile.synthetic-label \
+            --build-arg BASE_IMAGE=papelaai:gate7-previous-base \
+            --build-arg "RELEASE_COMMIT=$previous" \
+            --tag "papelaai:sha-$previous" .
+          docker run --rm --network none "papelaai:sha-$previous" \
+            python scripts/verify_extractor.py
 
       - name: Remove automation key from agent
         if: ${{ always() }}
@@ -268,6 +288,14 @@ jobs:
             exit 1
           fi
 
+      - name: Gate 7 isolated A to B to A deploy and rollback drill
+        run: |
+          uv run --no-sync python -m scripts.smoke_deploy_rollback \
+            --previous-commit "$(git rev-parse HEAD^)" \
+            --target-commit "$GITHUB_SHA" \
+            --state-dir "$RUNNER_TEMP/papela-gate7-drill" \
+            --project papela-gate7-ci
+
       - name: Gate 6 isolated backup and destructive restore test
         run: |
           uv run --no-sync python scripts/smoke_backup_restore.py seed \
@@ -326,6 +354,11 @@ jobs:
       - name: Remove Gate 4 synthetic stack and credentials
         if: ${{ always() }}
         run: |
+          if [[ -f "$RUNNER_TEMP/papela-gate7-drill/.env.synthetic" ]]; then
+            docker compose --project-name papela-gate7-ci \
+              --env-file "$RUNNER_TEMP/papela-gate7-drill/.env.synthetic" \
+              -f docker-compose.prod.yml down --volumes --remove-orphans
+          fi
           if [[ -n "${PAPELA_PG_ADMIN_PASSWORD_FILE:-}" && -f docker-compose.prod.yml ]]; then
             docker compose -f docker-compose.prod.yml down --volumes --remove-orphans
           fi
