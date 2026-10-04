@@ -102,22 +102,25 @@ docker compose --env-file /secure/.env.production -f docker-compose.prod.yml --p
   restore-test backup-YYYYMMDDTHHMMSSZ-aaaaaaaa papela_restore_yyyymmdd
 ```
 
-Use synthetic data for recurring drills. Inspect aggregate row and tenant
-counts, trigger/grants, API cross-tenant 404s, `/health`, `/readiness`, and a
-newly processed job before declaring recovery. The CI drill creates two
-tenants' completed jobs and one in-flight job, dumps, creates a disposable
-database containing a sentinel, **drops only that explicitly named test
-database**, recreates it empty, restores, repoints API/worker to it, and
-verifies the old results, isolation, reconciled job and a fresh job.
+Use synthetic data for recurring drills. `restore-test` leaves
+`privacy_state.restore_ready=FALSE`; the saved database name also differs from
+the isolated target. API/worker must remain stopped until the separate Gate 8
+erasure journal has been validated and replayed with the operator-only
+`reconcile` command. Inspect aggregate row and tenant counts, trigger/grants,
+API cross-tenant 404s, `/health`, `/readiness`, and a newly processed job only
+**after** reconciliation. The CI drill additionally deletes a job and
+offboards a synthetic tenant after the T0 backup, then proves neither is
+resurrected by restore. See [Gate 8 operations](gate8-data-lifecycle.md).
 
 For a real incident, first preserve the failed system and identify the last
 verified offsite/local archive. Rebuild a **new** host/cluster, restore external
 secrets from separate escrow, initialize the owner/runtime roles with the
-controlled migrator, create a new empty `papela_restore_*` database and execute
-the same restore command. Keep API/worker stopped until a designated operator
-reviews counts, ownership, cross-tenant access and the reconciliation list.
+controlled migrator, recover the **independent erasure journal** from separate
+escrow, create a new empty `papela_restore_*` database and execute the same
+restore command. Keep API/worker stopped until a designated operator validates
+the journal, reviews counts/ownership and replays all erasures into the target.
 Then change the external database-URL secret to the new database (do not print
-it), recreate API/worker, verify readiness and a synthetic extraction, and
+it), recreate API/worker, verify readiness, cross-tenant access and a synthetic extraction, and
 only then reopen traffic. If any check fails, leave traffic closed and keep
 the original DB/archive intact. The script has no production-DB overwrite
 override. Never use `down --volumes` on a real installation.

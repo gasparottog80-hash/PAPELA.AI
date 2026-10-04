@@ -31,6 +31,7 @@ SCHEMA_FILES = (
     "ops/0000_lock.sql",
     "app/migrations/0001_initial.sql",
     "app/migrations/0002_tenant_isolation.sql",
+    "app/migrations/0003_privacy_state.sql",
     "ops/010_runtime_role.sql",
 )
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -105,6 +106,15 @@ def git_blob(commit: str, name: str) -> bytes:
 def schema_fingerprint(commit: str | None = None) -> str:
     digest = hashlib.sha256()
     for name in SCHEMA_FILES:
+        # Preserve the exact Gate 7 fingerprint for historical commits that
+        # predate the additive Gate 8 privacy-state migration.
+        if commit and name == "app/migrations/0003_privacy_state.sql":
+            present = subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}:{name}"],
+                cwd=ROOT, capture_output=True, check=False,
+            )
+            if present.returncode:
+                continue
         digest.update(name.encode("ascii") + b"\0")
         content = git_blob(commit, name) if commit else (ROOT / name).read_bytes()
         digest.update(content.replace(b"\r\n", b"\n"))
@@ -411,6 +421,11 @@ def preflight(
         raise ReleaseError("SMOKE_KEY_PERMISSIONS")
     if shutil.disk_usage(Path(values["PAPELA_BACKUP_DIR"])).free < 512 * 1024 * 1024:
         raise ReleaseError("DISK_SPACE_LOW")
+    erasure_dir = Path(values.get("PAPELA_ERASURE_DIR", ""))
+    if not erasure_dir.is_dir() or erasure_dir.is_symlink():
+        raise ReleaseError("ERASURE_JOURNAL_MISSING")
+    if os.name != "nt" and erasure_dir.stat().st_mode & 0o077:
+        raise ReleaseError("ERASURE_JOURNAL_PERMISSIONS")
     current = active(args.state_dir)
     previous: dict[str, Any] | None = None
     if current is None and not args.initial:

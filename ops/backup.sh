@@ -11,7 +11,7 @@ db_user=papela_owner
 stage=
 operation=${1:-}
 case "$operation" in
-    backup|verify|retention) operation_event=$operation ;;
+    backup|verify|retention|retention-age) operation_event=$operation ;;
     restore-test) operation_event=restore_test ;;
     *) operation_event=backup ;;
 esac
@@ -78,6 +78,7 @@ do_backup() {
     load_password
     event INFO backup_started NONE
     stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+    created_at=$(timestamp)
     nonce=$(cut -c1-8 /proc/sys/kernel/random/uuid)
     id="backup-$stamp-$nonce"
     final="$backup_root/$id"
@@ -85,6 +86,12 @@ do_backup() {
     stage=$(mktemp -d "$backup_root/.partial-backup-XXXXXX") \
         || fail BACKUP_STAGING_FAILED
     chmod 700 "$stage"
+    # A privacy marker can commit during pg_dump. Generations are monotonic;
+    # equal values before/after prove the dump did not cross an erasure.
+    privacy_before=$(psql -X -Atq --host="$db_host" --username="$db_user" \
+        --dbname="$db_name" -c 'SELECT generation FROM public.privacy_state WHERE singleton=TRUE' 2>/dev/null) \
+        || fail BACKUP_PRIVACY_STATE_UNAVAILABLE
+    case "$privacy_before" in *[!0-9]*|'') fail BACKUP_PRIVACY_STATE_UNAVAILABLE ;; esac
     pg_dump --host="$db_host" --username="$db_user" --dbname="$db_name" \
         --format=custom --compress=6 --no-password \
         --file="$stage/database.dump" >/dev/null 2>&1 \
@@ -92,6 +99,10 @@ do_backup() {
     [ "$(wc -c < "$stage/database.dump")" -gt 0 ] || fail BACKUP_EMPTY
     pg_restore --list "$stage/database.dump" >/dev/null 2>&1 \
         || fail BACKUP_ARCHIVE_INVALID
+    privacy_after=$(psql -X -Atq --host="$db_host" --username="$db_user" \
+        --dbname="$db_name" -c 'SELECT generation FROM public.privacy_state WHERE singleton=TRUE' 2>/dev/null) \
+        || fail BACKUP_PRIVACY_STATE_UNAVAILABLE
+    [ "$privacy_before" = "$privacy_after" ] || fail BACKUP_PRIVACY_GENERATION_CHANGED
     (cd "$stage" && sha256sum database.dump > database.sha256) \
         || fail BACKUP_CHECKSUM_FAILED
     (cd "$stage" && sha256sum -c database.sha256 >/dev/null 2>&1) \
@@ -101,8 +112,8 @@ do_backup() {
         || fail BACKUP_METADATA_FAILED
     case "$server_version" in *[!0-9]*|'') fail BACKUP_METADATA_FAILED ;; esac
     bytes=$(wc -c < "$stage/database.dump")
-    printf '{"format":"pg_dump_custom_v1","created_at_utc":"%s","schema":"jobs-tenant-v2","postgres_version_num":%s,"bytes":%s}\n' \
-        "$(timestamp)" "$server_version" "$bytes" > "$stage/metadata.json"
+    printf '{"format":"pg_dump_custom_v1","created_at_utc":"%s","source_database":"%s","schema":"jobs-tenant-v3","privacy_generation":%s,"postgres_version_num":%s,"bytes":%s}\n' \
+        "$created_at" "$db_name" "$privacy_after" "$server_version" "$bytes" > "$stage/metadata.json"
     chmod 600 "$stage/database.dump" "$stage/database.sha256" "$stage/metadata.json"
     mv -- "$stage" "$final" || fail BACKUP_PUBLISH_FAILED
     stage=
@@ -156,6 +167,11 @@ do_restore() {
     psql -X -q --host="$db_host" --username="$db_user" --dbname="$target" \
         -v ON_ERROR_STOP=1 -c "UPDATE public.jobs SET status='failed', error='processing_error: RestoreRequiresResubmission', purged_at=now(), updated_at=now() WHERE status IN ('pending','processing')" \
         >/dev/null 2>&1 || fail RESTORE_RECONCILIATION_FAILED
+    # A restored snapshot is never promotable until the independent erasure
+    # journal has been validated and replayed by the Gate 8 operator command.
+    psql -X -q --host="$db_host" --username="$db_user" --dbname="$target" \
+        -v ON_ERROR_STOP=1 -c "UPDATE public.privacy_state SET restore_ready=FALSE WHERE singleton=TRUE" \
+        >/dev/null 2>&1 || fail RESTORE_ERASURE_GATE_FAILED
     event INFO restore_test_succeeded NONE
 }
 do_retention() {
@@ -180,11 +196,43 @@ do_retention() {
     done
     event INFO retention_succeeded NONE
 }
+do_retention_age() {
+    [ "$#" -eq 1 ] || fail RETENTION_ARGUMENT_INVALID
+    require_root
+    new_id=$1
+    days=${PAPELA_BACKUP_RETENTION_DAYS:-30}
+    case "$days" in *[!0-9]*|'') fail RETENTION_ARGUMENT_INVALID ;; esac
+    [ "$days" -ge 1 ] && [ "$days" -le 3650 ] || fail RETENTION_ARGUMENT_INVALID
+    verify_archive "$new_id"
+    ids=$(for path in "$backup_root"/backup-*; do
+        [ -d "$path" ] && [ ! -L "$path" ] || continue
+        name=${path##*/}
+        valid_id "$name" && printf '%s\n' "$name"
+    done | sort -r)
+    latest=$(printf '%s\n' "$ids" | head -n 1)
+    [ "$latest" = "$new_id" ] || fail RETENTION_REQUIRES_NEWEST_VERIFIED
+    now=$(date -u '+%s')
+    cutoff=$((now - days * 86400))
+    # Preserve the newest two completed copies even when both are older than
+    # the technical age window. Their own archive integrity is still checked
+    # by the ordinary backup/verify workflow.
+    printf '%s\n' "$ids" | tail -n +3 | while IFS= read -r old_id; do
+        [ -n "$old_id" ] && valid_id "$old_id" || continue
+        modified=$(stat -c '%Y' "$backup_root/$old_id") \
+            || fail RETENTION_STAT_FAILED
+        case "$modified" in *[!0-9]*|'') fail RETENTION_STAT_FAILED ;; esac
+        if [ "$modified" -lt "$cutoff" ]; then
+            rm -r -- "$backup_root/$old_id" || fail RETENTION_DELETE_FAILED
+        fi
+    done
+    event INFO retention_age_succeeded NONE
+}
 
 case "$operation" in
     backup) shift; do_backup "$@" ;;
     verify) shift; do_verify "$@" ;;
     restore-test) shift; do_restore "$@" ;;
     retention) shift; do_retention "$@" ;;
+    retention-age) shift; do_retention_age "$@" ;;
     *) fail BACKUP_ACTION_INVALID ;;
 esac

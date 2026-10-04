@@ -22,6 +22,7 @@ if psql -X -q -1 -v ON_ERROR_STOP=1 -h postgres -U papela_owner -d papela \
     -f /opt/papela/0000_lock.sql \
     -f /opt/papela/0001_initial.sql \
     -f /opt/papela/0002_tenant_isolation.sql \
+    -f /opt/papela/0003_privacy_state.sql \
     -f /opt/papela/010_runtime_role.sql >/dev/null 2>&1; then
     duration_ms=$(( $(uptime_ms) - started_ms ))
     printf '{"ts":"%s","level":"INFO","service":"migrate","event":"migration.completed","duration_ms":%s}\n' "$(timestamp)" "$duration_ms"

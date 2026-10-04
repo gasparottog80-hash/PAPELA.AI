@@ -7,6 +7,8 @@ x-app-env: &app-env
   PAPELA_OCR_ENGINE: text
   PAPELA_PURGE_AFTER_DONE: "true"
   PAPELA_STORAGE_DIR: /data/pdfs
+  PAPELA_ERASURE_DIR: /data/erasures
+  PAPELA_JOB_RETENTION_DAYS: ${PAPELA_JOB_RETENTION_DAYS:-30}
   PAPELA_ALLOWED_HOSTS: ${PAPELA_DOMAIN:?set a real FQDN},localhost,127.0.0.1
   PAPELA_DB_POOL_MIN: "1"
   PAPELA_DB_POOL_MAX: "5"
@@ -107,6 +109,8 @@ services:
       dockerfile: Dockerfile.backup
     pull_policy: never
     restart: "no"
+    environment:
+      PAPELA_BACKUP_RETENTION_DAYS: ${PAPELA_BACKUP_RETENTION_DAYS:-30}
     user: "70:70"
     read_only: true
     tmpfs:
@@ -147,6 +151,9 @@ services:
         target: PAPELA_TENANT_API_KEYS
     volumes:
       - pdfs:/data/pdfs
+      - type: bind
+        source: ${PAPELA_ERASURE_DIR:?provide a restricted independent erasure directory}
+        target: /data/erasures
     networks:
       - edge
       - database
@@ -184,6 +191,9 @@ services:
         target: PAPELA_DATABASE_URL
     volumes:
       - pdfs:/data/pdfs
+      - type: bind
+        source: ${PAPELA_ERASURE_DIR:?provide a restricted independent erasure directory}
+        target: /data/erasures
     networks:
       - database
     depends_on:

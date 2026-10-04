@@ -82,6 +82,130 @@ class JobRepository:
             )
             return cur.rowcount == 1
 
+    def privacy_generation(self) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT generation, restore_ready, "
+                "database_name = current_database() FROM privacy_state "
+                "WHERE singleton = TRUE"
+            ).fetchone()
+            if row is None or not row[1] or not row[2]:
+                raise RuntimeError("privacy reconciliation required")
+            return int(row[0])
+
+    def database_name(self) -> str:
+        with self._pool.connection() as conn:
+            row = conn.execute("SELECT current_database()").fetchone()
+            if row is None:
+                raise RuntimeError("database identity unavailable")
+            return str(row[0])
+
+    def privacy_generation_raw(self) -> int:
+        """Read the saved generation even while restore readiness is false."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT generation FROM privacy_state WHERE singleton = TRUE"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("privacy state missing")
+            return int(row[0])
+
+    def _advance(self, conn: Any, generation: int) -> None:
+        row = conn.execute(
+            "UPDATE privacy_state SET generation = %s, updated_at = now() "
+            "WHERE singleton = TRUE AND restore_ready = TRUE AND generation = %s",
+            (generation, generation - 1),
+        )
+        if row.rowcount != 1:
+            raise RuntimeError("privacy generation mismatch")
+
+    def delete_terminal_and_advance(
+        self, job_id: str, tenant_id: str, generation: int
+    ) -> bool:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                deleted = conn.execute(
+                    "DELETE FROM jobs WHERE id = %s AND tenant_id = %s "
+                    "AND status IN ('done', 'failed')",
+                    (job_id, tenant_id),
+                ).rowcount
+                if deleted != 1:
+                    raise RuntimeError("marked job not terminal")
+                self._advance(conn, generation)
+                return True
+
+    def expired_terminal_jobs(
+        self, *, retention_days: int, limit: int = 100
+    ) -> list[tuple[str, str]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id::text, tenant_id::text FROM jobs "
+                "WHERE status IN ('done', 'failed') "
+                "AND created_at < now() - make_interval(days => %s) "
+                "ORDER BY created_at, id LIMIT %s",
+                (retention_days, limit),
+            ).fetchall()
+            return [(row[0], row[1]) for row in rows]
+
+    def tenant_jobs(self, tenant_id: str) -> list[dict[str, Any]]:
+        with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                "SELECT id::text, status, filename, pages, result, error, "
+                "attempts, created_at, updated_at, purged_at FROM jobs "
+                "WHERE tenant_id = %s ORDER BY created_at, id",
+                (tenant_id,),
+            )
+            return list(cur.fetchall())
+
+    def active_tenant_jobs(self, tenant_id: str) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM jobs WHERE tenant_id = %s "
+                "AND status IN ('pending', 'processing')", (tenant_id,)
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def delete_tenant_and_advance(self, tenant_id: str, generation: int) -> int:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                deleted = conn.execute(
+                    "DELETE FROM jobs WHERE tenant_id = %s", (tenant_id,)
+                ).rowcount
+                self._advance(conn, generation)
+                return deleted
+
+    def advance_privacy_generation(self, generation: int) -> None:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._advance(conn, generation)
+
+    def reconcile_erasures(
+        self, tenants: set[str], jobs: set[tuple[str, str]], generation: int
+    ) -> int:
+        """After restore, replay every marker before promoting the database."""
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                deleted = 0
+                for tenant_id in sorted(tenants):
+                    deleted += conn.execute(
+                        "DELETE FROM jobs WHERE tenant_id = %s", (tenant_id,)
+                    ).rowcount
+                for tenant_id, job_id in sorted(jobs):
+                    deleted += conn.execute(
+                        "DELETE FROM jobs WHERE id = %s AND tenant_id = %s",
+                        (job_id, tenant_id),
+                    ).rowcount
+                updated = conn.execute(
+                    "UPDATE privacy_state SET generation = %s, "
+                    "restore_ready = TRUE, database_name = current_database(), "
+                    "updated_at = now() "
+                    "WHERE singleton = TRUE", (generation,)
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("privacy state missing")
+                return deleted
+
     def claim_next(self) -> dict[str, Any] | None:
         """Atomically claim one pending job. Returns None if queue empty."""
         with self._pool.connection() as conn:
@@ -89,7 +213,7 @@ class JobRepository:
                 cur = conn.cursor(row_factory=dict_row)
                 cur.execute(
                     """
-                    SELECT id, storage_path, filename, attempts
+                    SELECT id, tenant_id::text, storage_path, filename, attempts
                     FROM jobs
                     WHERE status = 'pending'
                     ORDER BY created_at

@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from app.erasure import ErasureJournal
 from ops import release
 
 COMPOSE_KEYS = {
@@ -136,6 +137,7 @@ def main() -> None:
         PAPELA_HTTP_PORT=str(options.http_port),
         PAPELA_HTTPS_PORT=str(options.https_port),
         PAPELA_BACKUP_DIR=(state / "backups").as_posix(),
+        PAPELA_ERASURE_DIR=(state / "erasures").as_posix(),
         PAPELA_MAX_STORAGE_BYTES="536870912",
     )
     env_path = state / ".env.synthetic"
@@ -147,8 +149,13 @@ def main() -> None:
         env_path.chmod(0o600)
     backup_dir = state / "backups"
     backup_dir.mkdir(mode=0o700)
+    erasure_dir = state / "erasures"
+    ErasureJournal.initialize(str(erasure_dir))
     if os.name != "nt":
         subprocess.run(["sudo", "chown", "70:70", str(backup_dir)], check=True)
+        subprocess.run(
+            ["sudo", "chown", "-R", "65532:65532", str(erasure_dir)], check=True
+        )
     # These are public test-only values already used by Gate 4; never read or
     # echo the production tenant-key mapping from its protected file.
     primary = "gate4-synthetic-tenant-key-11111111111111111111111111"
@@ -186,6 +193,24 @@ def main() -> None:
     args.backup_id = backup(args, image_a)
     args.initial = False
     args.migration_class = "none"
+    # Additive privacy_state table: old A ignores it, so rollback remains
+    # backward-compatible. This review is synthetic drill evidence only.
+    review = state / "gate8-schema-review.json"
+    review.write_text(
+        json.dumps(
+            {
+                "from_schema": release.schema_fingerprint(options.previous_commit),
+                "to_schema": release.schema_fingerprint(options.target_commit),
+                "classification": "backward-compatible",
+                "old_app_compatible": True,
+                "reviewed_by": "synthetic-gate8-drill",
+            }
+        ),
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        review.chmod(0o600)
+    args.migration_review = review
     args.commit = options.target_commit
     args.simulate_post_deploy_failure = True
     try:

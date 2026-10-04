@@ -96,7 +96,13 @@ def _scope(headers):
         "method": "POST",
         "headers": headers,
         "query_string": b"",
-        "app": SimpleNamespace(state=SimpleNamespace(rate_limiter=RateLimiter(60))),
+        "app": SimpleNamespace(
+            state=SimpleNamespace(
+                rate_limiter=RateLimiter(60),
+                repo=SimpleNamespace(privacy_generation=lambda: 0),
+                journal=SimpleNamespace(state=lambda: (0, set(), set())),
+            )
+        ),
     }
 
 

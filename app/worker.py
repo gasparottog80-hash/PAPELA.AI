@@ -8,12 +8,15 @@ from types import FrameType
 
 from .config import Settings, get_settings
 from .db import Database
+from .erasure import ErasureJournal
 from .error_codes import (
     DB_UNAVAILABLE,
     INTERNAL_ERROR,
     PROCESSING_TIMEOUT,
     code_for_exception,
 )
+from .lifecycle import purge_expired_results
+from .lifecycle import ready as privacy_ready
 from .metrics import METRICS, start_metrics_server
 from .processing import bounded_process
 from .repository import JobRepository
@@ -38,6 +41,9 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
     BEFORE the raw PDF is deleted. So a crash can at worst leave an orphaned
     PDF (cleaned by the retention sweep) — never a purged file with no result.
     """
+    journal = ErasureJournal(settings.erasure_dir)
+    if not privacy_ready(repo, journal):
+        return False
     job = repo.claim_next()
     if job is None:
         return False
@@ -53,6 +59,14 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
         if Path(job["storage_path"]).resolve() != Path(path):
             raise ValueError("unsafe job storage path")
         result = bounded_process("ocr", path, settings)
+        # Offboarding may have marked this tenant while the child was parsing.
+        # Never persist its result after the marker, even if the row is still
+        # awaiting cleanup in a concurrent operator command.
+        _, disabled, erased_jobs = journal.state()
+        if job["tenant_id"] in disabled or (job["tenant_id"], job_id) in erased_jobs:
+            outcome = "erased"
+            logger.info("job.erased_in_flight", extra={"job_id": job_id})
+            return True
         # 1) Persist the result first (data safety).
         repo.mark_done(job_id, result)
         METRICS.inc("jobs_completed_total")
@@ -101,8 +115,10 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
                 logger.warning(
                     "job.retry",
                     extra={
-                        "job_id": job_id, "attempt": attempt,
-                        "duration_ms": duration_ms, "error_code": error_code,
+                        "job_id": job_id,
+                        "attempt": attempt,
+                        "duration_ms": duration_ms,
+                        "error_code": error_code,
                         "error": sanitize_error(exc),
                     },
                 )
@@ -111,8 +127,10 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
                 logger.error(
                     "job.failed",
                     extra={
-                        "job_id": job_id, "attempt": attempt,
-                        "duration_ms": duration_ms, "error_code": error_code,
+                        "job_id": job_id,
+                        "attempt": attempt,
+                        "duration_ms": duration_ms,
+                        "error_code": error_code,
                         "error": sanitize_error(exc),
                     },
                 )
@@ -121,8 +139,10 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
             logger.error(
                 "job.cleanup_failed",
                 extra={
-                    "job_id": job_id, "attempt": attempt,
-                    "duration_ms": duration_ms, "error_code": error_code,
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "duration_ms": duration_ms,
+                    "error_code": error_code,
                     "error": sanitize_error(exc),
                 },
             )
@@ -134,7 +154,8 @@ def process_one(repo: JobRepository, settings: Settings) -> bool:
                 logger.error(
                     "job.cleanup_failed",
                     extra={
-                        "job_id": job_id, "attempt": attempt,
+                        "job_id": job_id,
+                        "attempt": attempt,
                         "error_code": code_for_exception(cleanup_exc),
                         "error": sanitize_error(cleanup_exc),
                     },
@@ -154,6 +175,10 @@ def run() -> None:
     from .logging_config import configure_logging
 
     configure_logging(settings.log_level, "worker")
+    if settings.env != "production":
+        ErasureJournal.initialize(settings.erasure_dir)
+    journal = ErasureJournal(settings.erasure_dir)
+    journal.validate()
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -182,6 +207,10 @@ def run() -> None:
             heartbeat.touch()
             METRICS.heartbeat()
             now = time.monotonic()
+            if not privacy_ready(repo, journal):
+                logger.error("privacy.not_ready", extra={"error_code": INTERNAL_ERROR})
+                time.sleep(idle_backoff)
+                continue
             if now - last_heartbeat_log >= 60:
                 logger.info("worker.heartbeat")
                 last_heartbeat_log = now
@@ -211,6 +240,12 @@ def run() -> None:
                     logger.exception(
                         "retention.sweep_failed",
                         extra={"error_code": INTERNAL_ERROR},
+                    )
+                try:
+                    purge_expired_results(repo, journal, settings)
+                except Exception:  # noqa: BLE001 - fail closed, retry after repair
+                    logger.error(
+                        "retention.results_failed", extra={"error_code": INTERNAL_ERROR}
                     )
                 last_sweep = now
 

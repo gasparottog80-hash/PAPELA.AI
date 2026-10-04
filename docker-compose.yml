@@ -7,7 +7,9 @@ x-app-env: &app-env
   PAPELA_ENV: ${PAPELA_ENV:-development}
   PAPELA_LOG_LEVEL: ${PAPELA_LOG_LEVEL:-INFO}
   PAPELA_STORAGE_DIR: /data/pdfs
+  PAPELA_ERASURE_DIR: /data/erasures
   PAPELA_RETENTION_DAYS: ${PAPELA_RETENTION_DAYS:-7}
+  PAPELA_JOB_RETENTION_DAYS: ${PAPELA_JOB_RETENTION_DAYS:-30}
 
 services:
   postgres:
@@ -41,6 +43,7 @@ services:
         condition: service_healthy
     volumes:
       - papela_pdfs:/data/pdfs
+      - papela_erasures:/data/erasures
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
       interval: 5s
@@ -65,7 +68,9 @@ services:
     volumes:
       # Shared with the API: API writes PDFs here, worker reads + purges them.
       - papela_pdfs:/data/pdfs
+      - papela_erasures:/data/erasures
 
 volumes:
   pgdata:
   papela_pdfs:
+  papela_erasures:

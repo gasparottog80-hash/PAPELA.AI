@@ -81,12 +81,16 @@ def _db_available() -> bool:
 
 
 @pytest.fixture()
-def client():
+def client(tmp_path, monkeypatch):
     assert _db_available(), "Integration tests require disposable Postgres; no skips"
+    monkeypatch.setattr(get_settings(), "erasure_dir", str(tmp_path / "erasures"))
     with TestClient(app) as c:
         # Clean slate for deterministic assertions.
         with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
             conn.execute("TRUNCATE jobs")
+            conn.execute(
+                "UPDATE privacy_state SET generation = 0, restore_ready = TRUE"
+            )
         yield c
 
 

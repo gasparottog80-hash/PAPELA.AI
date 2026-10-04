@@ -11,4 +11,6 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO papela_runtime;
 REVOKE ALL ON public.jobs FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.jobs TO papela_runtime;
+REVOKE ALL ON public.privacy_state FROM PUBLIC;
+GRANT SELECT, UPDATE ON public.privacy_state TO papela_runtime;
 REVOKE ALL ON FUNCTION public.jobs_reject_tenant_change() FROM PUBLIC;

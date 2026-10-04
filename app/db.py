@@ -114,6 +114,11 @@ class Database:
                         raise RuntimeError(
                             "Production requires immutable tenant ownership"
                         )
+                    privacy_table = conn.execute(
+                        "SELECT to_regclass('public.privacy_state')"
+                    ).fetchone()
+                    if not privacy_table or privacy_table[0] is None:
+                        raise RuntimeError("Production requires privacy migration")
                 else:
                     conn.execute(SCHEMA_SQL)
                     migration = (
@@ -123,6 +128,11 @@ class Database:
                     )
                     with conn.transaction():
                         conn.execute(migration)
+                        conn.execute(
+                            files("app")
+                            .joinpath("migrations/0003_privacy_state.sql")
+                            .read_text(encoding="utf-8")
+                        )
         except Exception:
             self._pool.close()
             raise

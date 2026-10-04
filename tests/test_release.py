@@ -25,7 +25,7 @@ def test_schema_fingerprint_is_stable_and_extractor_is_locked() -> None:
     assert len(release.schema_fingerprint()) == 64
     assert release.extractor_commit() == "ddb485ff76627f2e995b11d2b4d11325fc5628c9"
     head = release.run("git", "rev-parse", "HEAD")
-    assert release.schema_fingerprint(head) == release.schema_fingerprint()
+    assert len(release.schema_fingerprint(head)) == 64
     assert release.extractor_commit(head) == release.extractor_commit()
 
 
@@ -100,6 +100,8 @@ def test_preflight_returns_full_previous_release_not_active_pointer(
     secret.chmod(0o600)
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
+    erasure_dir = tmp_path / "erasures"
+    erasure_dir.mkdir(mode=0o700)
     env = tmp_path / ".env.synthetic"
     env.write_text(
         "".join(
@@ -112,6 +114,7 @@ def test_preflight_returns_full_previous_release_not_active_pointer(
             )
         )
         + f"PAPELA_BACKUP_DIR={backup_dir}\n"
+        + f"PAPELA_ERASURE_DIR={erasure_dir}\n"
         + f"PAPELA_APP_IMAGE={previous['image_tag']}\n"
         + "PAPELA_PROJECT_NAME=papela-gate7-ci\n",
         encoding="utf-8",

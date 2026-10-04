@@ -21,7 +21,7 @@ STATUS_CLASSES = frozenset({"2xx", "3xx", "4xx", "5xx"})
 REJECTION_REASONS = frozenset(
     {"auth", "rate_limit", "too_large", "invalid_pdf", "storage", "timeout"}
 )
-JOB_OUTCOMES = frozenset({"done", "retry", "failed", "cleanup_failed"})
+JOB_OUTCOMES = frozenset({"done", "retry", "failed", "cleanup_failed", "erased"})
 DB_OPERATIONS = frozenset({"startup", "readiness", "request", "worker"})
 BUCKETS = (0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0, 120.0)
 

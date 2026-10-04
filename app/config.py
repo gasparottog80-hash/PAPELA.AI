@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     # --- Upload / storage (on-premise disk, no cloud) ---
     storage_dir: str = "./data/pdfs"
+    erasure_dir: str = "./data/erasures"
     max_upload_bytes: int = Field(default=20 * 1024 * 1024, gt=0, le=20 * 1024 * 1024)
     max_pdf_pages: int = Field(default=100, gt=0, le=100)
     max_storage_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
@@ -73,6 +74,8 @@ class Settings(BaseSettings):
     # Retention for done jobs' raw PDFs; the periodic sweep deletes files
     # older than this. The extracted JSON in Postgres is NOT deleted here.
     retention_days: int = Field(default=7, ge=0)
+    # Technical default, not a contractual or legal retention period.
+    job_retention_days: int = Field(default=30, ge=1)
     # How often the worker runs the retention sweep + stalled-job reaper.
     purge_interval_s: int = Field(default=3600, gt=0)
     # A job stuck in 'processing' longer than this (worker crashed between

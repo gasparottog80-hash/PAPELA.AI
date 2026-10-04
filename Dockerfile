@@ -65,8 +65,8 @@ RUN apt-get update \
 # Remove global pip/setuptools/wheel and their vendored runtime CVE surface.
 FROM builder AS stripped-python
 RUN /usr/local/bin/python -m pip uninstall --yes pip setuptools wheel \
-    && mkdir -p /runtime-data/pdfs \
-    && chmod 700 /runtime-data/pdfs
+    && mkdir -p /runtime-data/pdfs /runtime-data/erasures \
+    && chmod 700 /runtime-data/pdfs /runtime-data/erasures
 
 FROM gcr.io/distroless/base-debian13@sha256:0896741ba5bafd3ac87ea025a5f578952f2d238ddc3614cb368acc983a687aa2 AS runtime
 
@@ -93,6 +93,7 @@ COPY --from=stripped-python --chown=65532:65532 /app/.venv /app/.venv
 COPY --from=builder /app/uv.lock /app/uv.lock
 COPY --from=builder /app/scripts/verify_extractor.py /app/scripts/verify_extractor.py
 COPY --from=stripped-python --chown=65532:65532 --chmod=0700 /runtime-data/pdfs /data/pdfs
+COPY --from=stripped-python --chown=65532:65532 --chmod=0700 /runtime-data/erasures /data/erasures
 
 # Distroless has no shell/package manager. Keep the same non-root runtime.
 USER 65532:65532

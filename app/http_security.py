@@ -22,6 +22,7 @@ from .error_codes import (
     UPLOAD_TOO_LARGE,
     code_for_exception,
 )
+from .lifecycle import ready as privacy_ready
 from .metrics import METRICS
 from .security import tenant_for_api_key
 
@@ -112,6 +113,15 @@ class SecurityBoundary:
                 if tenant_id is None:
                     await reject(401, "invalid api key", AUTH_INVALID)
                     return
+                if not privacy_ready(
+                    scope["app"].state.repo, scope["app"].state.journal
+                ):
+                    await reject(503, "service unavailable", DB_UNAVAILABLE)
+                    return
+                _, disabled, _ = scope["app"].state.journal.state()
+                if tenant_id in disabled:
+                    await reject(401, "invalid api key", AUTH_INVALID)
+                    return
                 scope["state"]["tenant_id"] = tenant_id
                 if not scope["app"].state.rate_limiter.allow(tenant_id):
                     await reject(429, "rate limit exceeded", RATE_LIMITED)
@@ -184,7 +194,8 @@ class SecurityBoundary:
             duration = time.monotonic() - started_at
             status_class = f"{status_code // 100}xx"
             METRICS.inc(
-                "requests_total", route,
+                "requests_total",
+                route,
                 status_class if status_class in {"2xx", "3xx", "4xx", "5xx"} else "5xx",
             )
             METRICS.observe("request_duration_seconds", duration, route)

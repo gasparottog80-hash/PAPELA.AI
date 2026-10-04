@@ -57,10 +57,14 @@ def pdf() -> bytes:
 
 
 @pytest.fixture()
-def client():
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "erasure_dir", str(tmp_path / "erasures"))
     with TestClient(app) as test_client:
         with psycopg.connect(get_settings().database_url, autocommit=True) as conn:
             conn.execute("TRUNCATE jobs")
+            conn.execute(
+                "UPDATE privacy_state SET generation = 0, restore_ready = TRUE"
+            )
         yield test_client
 
 

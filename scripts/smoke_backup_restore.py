@@ -15,6 +15,8 @@ from uuid import UUID
 import httpx
 from smoke_production_local import TENANT_A, TENANT_B, digital_pdf
 
+TENANT_C = {"X-API-Key": "gate8-synthetic-tenant-key-33333333333333333333333333"}
+
 
 def _job_done(client: httpx.Client, job_id: str, auth: dict[str, str]) -> dict:
     deadline = time.monotonic() + 60
@@ -45,7 +47,7 @@ def _create(client: httpx.Client, auth: dict[str, str]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("seed", "verify"))
+    parser.add_argument("phase", choices=("seed", "erase", "verify"))
     parser.add_argument("--state", required=True)
     parser.add_argument("--ca", required=True)
     parser.add_argument("--port", type=int, default=18443)
@@ -65,16 +67,40 @@ def main() -> None:
         if args.phase == "seed":
             job_a = _create(client, TENANT_A)
             job_b = _create(client, TENANT_B)
+            erasure_job = _create(client, TENANT_A)
+            tenant_c_job = _create(client, TENANT_C)
             state_path.write_text(
-                json.dumps({"tenant_a_job": job_a, "tenant_b_job": job_b}),
+                json.dumps({"tenant_a_job": job_a, "tenant_b_job": job_b,
+                            "erasure_job": erasure_job,
+                            "tenant_c_job": tenant_c_job}),
                 encoding="utf-8",
             )
+        elif args.phase == "erase":
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            erased = str(UUID(state["erasure_job"]))
+            assert (
+                client.delete(f"/v1/jobs/{erased}", headers=TENANT_B).status_code == 404
+            )
+            assert (
+                client.delete(f"/v1/jobs/{erased}", headers=TENANT_A).status_code == 204
+            )
+            assert (
+                client.delete(f"/v1/jobs/{erased}", headers=TENANT_A).status_code == 204
+            )
+            assert client.get(f"/v1/jobs/{erased}", headers=TENANT_A).status_code == 404
         else:
             state = json.loads(state_path.read_text(encoding="utf-8"))
             job_a = str(UUID(state["tenant_a_job"]))
             job_b = str(UUID(state["tenant_b_job"]))
             _job_done(client, job_a, TENANT_A)
             _job_done(client, job_b, TENANT_B)
+            erased = str(UUID(state["erasure_job"]))
+            assert client.get(f"/v1/jobs/{erased}", headers=TENANT_A).status_code == 404
+            tenant_c_job = str(UUID(state["tenant_c_job"]))
+            assert (
+                client.get(f"/v1/jobs/{tenant_c_job}", headers=TENANT_C).status_code
+                == 401
+            )
             if args.reconciled_job_id:
                 pending_id = str(UUID(args.reconciled_job_id))
                 failed = client.get(f"/v1/jobs/{pending_id}", headers=TENANT_A)

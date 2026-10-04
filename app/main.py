@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import get_settings
 from .db import Database
+from .erasure import ErasureJournal
 from .error_codes import (
     HTTP_ERROR_CODES,
     INVALID_PDF,
@@ -27,6 +28,9 @@ from .error_codes import (
     UPLOAD_TOO_LARGE,
 )
 from .http_security import SecurityBoundary
+from .lifecycle import create_job_if_enabled, visible_job
+from .lifecycle import delete_job as erase_job
+from .lifecycle import ready as privacy_ready
 from .metrics import METRICS, start_metrics_server
 from .repository import JobRepository
 from .schemas import ErrorResponse, JobStatus, UploadAccepted
@@ -59,8 +63,7 @@ async def lifespan(app: FastAPI):
         )
     if settings.env == "production":
         if any(
-            len(key) < 32 or not key.isascii()
-            for _, key in settings.tenant_key_pairs
+            len(key) < 32 or not key.isascii() for _, key in settings.tenant_key_pairs
         ):
             raise RuntimeError("Production requires strong ASCII API keys")
         if urlsplit(settings.database_url).password in {
@@ -76,6 +79,11 @@ async def lifespan(app: FastAPI):
         if not settings.purge_after_done:
             raise RuntimeError("Production requires raw-PDF purge after completion")
 
+    if settings.env != "production":
+        ErasureJournal.initialize(settings.erasure_dir)
+    journal = ErasureJournal(settings.erasure_dir)
+    journal.validate()
+
     db = Database(settings)
     try:
         db.open()
@@ -84,6 +92,7 @@ async def lifespan(app: FastAPI):
         raise
     app.state.db = db
     app.state.repo = JobRepository(db.pool)
+    app.state.journal = journal
     app.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
     try:
         metrics_server = start_metrics_server(METRICS)
@@ -171,7 +180,11 @@ async def readiness(request: Request) -> Response:
     except OSError:
         storage_ready = False
     db_ready = await run_in_threadpool(request.app.state.db.is_ready)
-    if not storage_ready or not db_ready:
+    if (
+        not storage_ready
+        or not db_ready
+        or not privacy_ready(request.app.state.repo, request.app.state.journal)
+    ):
         return JSONResponse(status_code=503, content={"status": "not_ready"})
     return JSONResponse(content={"status": "ready"})
 
@@ -218,13 +231,19 @@ async def upload(
         )
     except InvalidPdfError as exc:
         error_code = (
-            UPLOAD_TOO_LARGE if exc.status_code == 413 else
-            STORAGE_UNAVAILABLE if exc.status_code == 507 else INVALID_PDF
+            UPLOAD_TOO_LARGE
+            if exc.status_code == 413
+            else STORAGE_UNAVAILABLE
+            if exc.status_code == 507
+            else INVALID_PDF
         )
         METRICS.inc(
             "uploads_rejected_total",
-            "too_large" if exc.status_code == 413 else
-            "storage" if exc.status_code == 507 else "invalid_pdf",
+            "too_large"
+            if exc.status_code == 413
+            else "storage"
+            if exc.status_code == 507
+            else "invalid_pdf",
         )
         logger.warning(
             "upload.rejected",
@@ -238,7 +257,9 @@ async def upload(
         )
 
     try:
-        repo.create(
+        accepted = create_job_if_enabled(
+            repo,
+            request.app.state.journal,
             job_id=job_id,
             tenant_id=tenant_id,
             filename=safe_name(file.filename or "upload.pdf"),
@@ -246,6 +267,11 @@ async def upload(
             size_bytes=size,
             pages=pages,
         )
+        if not accepted:
+            delete_pdf(job_id, settings.storage_dir, reason="tenant-disabled")
+            raise HTTPException(status_code=401)
+    except HTTPException:
+        raise
     except Exception:
         delete_pdf(job_id, settings.storage_dir, reason="create-failed")
         raise
@@ -272,7 +298,7 @@ async def get_job(
     tenant_id: str = Depends(require_api_key),
 ):
     repo: JobRepository = request.app.state.repo
-    row = repo.get_for_tenant(str(job_id), tenant_id)
+    row = visible_job(repo, request.app.state.journal, tenant_id, str(job_id))
     if row is None:
         return JSONResponse(
             status_code=404,
@@ -298,7 +324,7 @@ async def get_job_audit(
     Cross-checks the DB purged_at stamp against the actual filesystem so
     drift (file gone but not stamped, or vice-versa) is visible."""
     repo: JobRepository = request.app.state.repo
-    row = repo.get_for_tenant(str(job_id), tenant_id)
+    row = visible_job(repo, request.app.state.journal, tenant_id, str(job_id))
     if row is None:
         return JSONResponse(
             status_code=404,
@@ -325,12 +351,12 @@ async def delete_job(
 ):
     """Delete a tenant's terminal result and raw PDF; active jobs cannot race it."""
     repo: JobRepository = request.app.state.repo
-    row = repo.get_for_tenant(str(job_id), tenant_id)
-    if row is None:
+    try:
+        deleted = erase_job(
+            repo, request.app.state.journal, get_settings(), tenant_id, str(job_id)
+        )
+    except ValueError:
+        raise HTTPException(status_code=409) from None
+    if not deleted:
         raise HTTPException(status_code=404)
-    if row["status"] not in ("done", "failed"):
-        raise HTTPException(status_code=409)
-    delete_pdf(str(job_id), get_settings().storage_dir, reason="tenant-delete")
-    if not repo.delete_terminal_for_tenant(str(job_id), tenant_id):
-        raise HTTPException(status_code=409)
     return Response(status_code=204)

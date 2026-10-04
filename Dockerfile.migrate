@@ -4,5 +4,6 @@ FROM postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f1
 RUN rm /usr/local/bin/gosu
 COPY app/migrations/0001_initial.sql /opt/papela/0001_initial.sql
 COPY app/migrations/0002_tenant_isolation.sql /opt/papela/0002_tenant_isolation.sql
+COPY app/migrations/0003_privacy_state.sql /opt/papela/0003_privacy_state.sql
 COPY ops/0000_lock.sql ops/010_runtime_role.sql ops/migrate.sh /opt/papela/
 ENTRYPOINT ["/bin/sh", "/opt/papela/migrate.sh"]

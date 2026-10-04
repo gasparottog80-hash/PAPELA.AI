@@ -9,6 +9,7 @@ x-test-env: &test-env
   PAPELA_ENV: test
   PAPELA_OCR_ENGINE: fake
   PAPELA_STORAGE_DIR: /data/pdfs
+  PAPELA_ERASURE_DIR: /data/erasures
   PAPELA_PURGE_AFTER_DONE: "true"
 
 services:
@@ -43,6 +44,7 @@ services:
         condition: service_healthy
     volumes:
       - gate1_pdfs:/data/pdfs
+      - gate1_erasures:/data/erasures
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
       interval: 2s
@@ -63,6 +65,8 @@ services:
         condition: service_healthy
     volumes:
       - gate1_pdfs:/data/pdfs
+      - gate1_erasures:/data/erasures
 
 volumes:
   gate1_pdfs:
+  gate1_erasures:

@@ -18,6 +18,10 @@ SAFE_EVENTS = frozenset(
         "job.cleanup_failed", "jobs.reaped", "reaper.failed",
         "retention.purged", "retention.sweep_failed", "retention.sweep",
         "pdf.delete_failed", "pdf.deleted", "pdf.delete_noop",
+        "data_deleted", "data_exported", "tenant_deleted",
+        "api_key_rotated", "api_key_revoked", "erasure.reconciled",
+        "retention.results_purged", "retention.results_failed",
+        "privacy.not_ready", "job.erased_in_flight",
     }
 )
 SAFE_ERROR = re.compile(r"^[a-z_]+: [A-Za-z][A-Za-z0-9_]{0,60}$")
@@ -55,6 +59,9 @@ class JsonFormatter(logging.Formatter):
             value = _safe_uuid(getattr(record, key, None))
             if value is not None:
                 payload[key] = value
+        subject_ref = getattr(record, "subject_ref", None)
+        if isinstance(subject_ref, str) and re.fullmatch(r"[0-9a-f]{16}", subject_ref):
+            payload["subject_ref"] = subject_ref
         duration = getattr(record, "duration_ms", None)
         if isinstance(duration, (int, float)) and 0 <= duration <= 3600000:
             payload["duration_ms"] = round(duration, 2)
@@ -77,6 +84,7 @@ class JsonFormatter(logging.Formatter):
         if cleanup_reason in {
             "rejected-upload", "create-failed", "purge-after-done",
             "terminal-failure", "tenant-delete", "retention-expired",
+            "result-retention", "tenant-offboard", "restore-erasure",
         }:
             payload["cleanup_reason"] = cleanup_reason
         # Only sanitized category and class name; never raw exception text.
