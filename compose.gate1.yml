@@ -29,6 +29,30 @@ services:
       timeout: 3s
       retries: 20
 
+  journal-init:
+    image: papelaai-gate3-revalidated
+    pull_policy: never
+    user: "0:0"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    network_mode: none
+    entrypoint:
+      - python
+      - -c
+      - >-
+        import os; p = "/data/erasures";
+        os.chown(p, 65532, 65532); os.chmod(p, 0o700);
+        s = os.stat(p);
+        assert s.st_uid == 65532 and s.st_gid == 65532 and s.st_mode & 0o777 == 0o700
+    volumes:
+      - gate1_erasures:/data/erasures
+
   api:
     image: papelaai-gate3-revalidated
     security_opt:
@@ -42,6 +66,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      journal-init:
+        condition: service_completed_successfully
     volumes:
       - gate1_pdfs:/data/pdfs
       - gate1_erasures:/data/erasures
