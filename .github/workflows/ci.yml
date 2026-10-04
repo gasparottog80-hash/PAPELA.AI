@@ -180,10 +180,6 @@ jobs:
           print(f'Test report PASS: {len(cases)} tests, zero skips/errors/failures')
           PY
 
-      - name: Gate 8 synthetic journal compaction and restore-floor regression
-        run: |
-          uv run --no-sync pytest -q tests/test_lifecycle.py -k compaction
-
       - name: Build application distributions
         run: uv build
 
@@ -212,11 +208,18 @@ jobs:
 
       - name: Smoke E2E against the freshly built API and worker
         run: |
+          trap 'docker compose -f compose.gate1.yml logs --no-color --tail=100 api worker' ERR
           docker compose -f compose.gate1.yml up --detach --wait --wait-timeout 90 api worker
           uv run --no-sync python scripts/smoke_ci.py
           uv run --no-sync python scripts/smoke_security.py
           git diff --exit-code -- pyproject.toml uv.lock
           git diff --check
+
+      # These tests advance the shared synthetic DB privacy generation. Run
+      # them after the smoke, which boots with its own fresh journal volume.
+      - name: Gate 8 synthetic journal compaction and restore-floor regression
+        run: |
+          uv run --no-sync pytest -q tests/test_lifecycle.py -k compaction
 
       - name: Gate 4 production topology with synthetic credentials
         run: |
