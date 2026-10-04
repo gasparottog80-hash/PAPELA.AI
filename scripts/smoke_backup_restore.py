@@ -77,6 +77,8 @@ def main() -> None:
             )
         elif args.phase == "erase":
             state = json.loads(state_path.read_text(encoding="utf-8"))
+            job_a = str(UUID(state["tenant_a_job"]))
+            job_b = str(UUID(state["tenant_b_job"]))
             erased = str(UUID(state["erasure_job"]))
             assert (
                 client.delete(f"/v1/jobs/{erased}", headers=TENANT_B).status_code == 404
