@@ -101,6 +101,12 @@ def main() -> None:
     for commit in (options.previous_commit, options.target_commit):
         if not release.SHA.fullmatch(commit):
             raise release.ReleaseError("SYNTHETIC_SHA_INVALID")
+    previous_schema = release.schema_fingerprint(options.previous_commit)
+    target_schema = release.schema_fingerprint(options.target_commit)
+    if previous_schema != target_schema:
+        raise release.ReleaseError(
+            "SYNTHETIC_SCHEMA_TRANSITION_REQUIRES_SEPARATE_REVIEW"
+        )
     if (
         not 1024 <= options.http_port <= 65535
         or not 1024 <= options.https_port <= 65535
@@ -182,6 +188,9 @@ def main() -> None:
     image_a = f"papelaai:sha-{options.previous_commit}"
     release.compose(args, image_a, "config", "--quiet")
     release.compose(args, image_a, "up", "-d", "--wait", "postgres")
+    # The current backup format requires a privacy generation. Bootstrap the
+    # isolated DB with the reviewed schema before taking its first snapshot.
+    release.compose(args, image_a, "--profile", "ops", "run", "--rm", "migrate")
     args.backup_id = backup(args, image_a)
     release.record(args)
     args.commit = options.target_commit
@@ -193,24 +202,6 @@ def main() -> None:
     args.backup_id = backup(args, image_a)
     args.initial = False
     args.migration_class = "none"
-    # Additive privacy_state table: old A ignores it, so rollback remains
-    # backward-compatible. This review is synthetic drill evidence only.
-    review = state / "gate8-schema-review.json"
-    review.write_text(
-        json.dumps(
-            {
-                "from_schema": release.schema_fingerprint(options.previous_commit),
-                "to_schema": release.schema_fingerprint(options.target_commit),
-                "classification": "backward-compatible",
-                "old_app_compatible": True,
-                "reviewed_by": "synthetic-gate8-drill",
-            }
-        ),
-        encoding="utf-8",
-    )
-    if os.name != "nt":
-        review.chmod(0o600)
-    args.migration_review = review
     args.commit = options.target_commit
     args.simulate_post_deploy_failure = True
     try:

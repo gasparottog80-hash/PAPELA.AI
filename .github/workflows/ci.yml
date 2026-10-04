@@ -101,7 +101,7 @@ jobs:
         env:
           DOCKER_BUILDKIT: '1'
         run: |
-          previous=d05185366eca70981d46334fd1f4b520c01cf81f
+          previous=899ea468fa121e74788d253092f95dd4637bf429
           git merge-base --is-ancestor "$previous" HEAD
           [[ "$previous" =~ ^[0-9a-f]{40}$ ]]
           mkdir -p "$RUNNER_TEMP/papela-gate7-previous"
@@ -328,7 +328,7 @@ jobs:
       - name: Gate 7 isolated A to B to A deploy and rollback drill
         run: |
           uv run --no-sync python -m scripts.smoke_deploy_rollback \
-            --previous-commit d05185366eca70981d46334fd1f4b520c01cf81f \
+            --previous-commit 899ea468fa121e74788d253092f95dd4637bf429 \
             --target-commit "$GITHUB_SHA" \
             --state-dir "$RUNNER_TEMP/papela-gate7-drill" \
             --project papela-gate7-ci
