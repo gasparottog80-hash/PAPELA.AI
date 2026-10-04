@@ -378,7 +378,9 @@ jobs:
           sudo touch -d '45 days ago' "$PAPELA_BACKUP_DIR/$aged_old" "$PAPELA_BACKUP_DIR/$aged_keep"
           docker compose -f docker-compose.prod.yml --profile ops run --rm \
             -e PAPELA_BACKUP_RETENTION_DAYS=30 backup retention-age "$backup_id"
-          [[ ! -e "$PAPELA_BACKUP_DIR/$aged_old" && -d "$PAPELA_BACKUP_DIR/$aged_keep" ]]
+          # The backup root is mode 0700/UID 70; the runner cannot stat inside it.
+          sudo test ! -e "$PAPELA_BACKUP_DIR/$aged_old"
+          sudo test -d "$PAPELA_BACKUP_DIR/$aged_keep"
           sudo rm -r -- "$PAPELA_BACKUP_DIR/$aged_keep"
           if docker compose -f docker-compose.prod.yml --profile ops run --rm backup \
             restore-test "$backup_id" papela; then
