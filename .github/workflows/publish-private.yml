@@ -35,7 +35,7 @@ jobs:
       UV_PYTHON_DOWNLOADS: never
       UV_NO_CACHE: '1'
       IMAGE_REPOSITORY: ghcr.io/gasparottog80-hash/papela-ai
-      DOCKER_CONFIG: ${{ runner.temp }}/papela-ghcr-docker
+      DOCKER_CONFIG: /tmp/papela-ghcr-docker
     steps:
       - name: Check out exact master commit without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -152,4 +152,6 @@ jobs:
         if: ${{ always() }}
         run: |
           docker logout ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$DOCKER_CONFIG/config.json"
+          rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
           rm -f -- "$RUNNER_TEMP/papela-private-runtime.tar" "$RUNNER_TEMP/papela-private-scan.json"
