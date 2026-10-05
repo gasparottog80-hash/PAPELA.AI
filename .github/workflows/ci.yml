@@ -252,6 +252,9 @@ jobs:
           sudo chown 65532:65532 "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE"
           sudo chmod 400 "$PAPELA_PG_ADMIN_PASSWORD_FILE" "$PAPELA_PG_RUNTIME_PASSWORD_FILE" "$PAPELA_DATABASE_URL_FILE" "$PAPELA_TENANT_API_KEYS_FILE"
           docker compose -f docker-compose.prod.yml config --quiet
+          # Parse the Linux host-only age-retention overlay; do not run it on CI.
+          docker compose -f docker-compose.prod.yml -f docker-compose.prod.journald.yml config --quiet
+          docker compose -f docker-compose.prod.yml -f docker-compose.prod.journald.yml config --format json | python -c 'import json,sys; services=json.load(sys.stdin)["services"]; assert all(service.get("logging", {}).get("driver") == "journald" and not service["logging"].get("options") for service in services.values())'
           docker compose -f docker-compose.prod.yml build caddy migrate postgres backup
           # Scan each final Gate 4 runtime before starting the synthetic stack.
           # No image or scan report is uploaded: they may reveal private code.

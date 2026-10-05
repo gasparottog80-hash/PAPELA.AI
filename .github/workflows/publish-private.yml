@@ -1,0 +1,155 @@
+name: Publish private reviewed runtime
+
+# Never runs on push or pull_request. First GHCR publication requires separate
+# human authorization and package-visibility review; committing this file
+# does not dispatch it. An explicitly dispatched run WOULD push.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_private_publication:
+        description: 'Type AUTHORIZE_PRIVATE_GHCR_PUSH after approving the first push'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-runtime-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.ref == 'refs/heads/master' &&
+      inputs.confirm_private_publication == 'AUTHORIZE_PRIVATE_GHCR_PUSH'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_CACHE: '1'
+      IMAGE_REPOSITORY: ghcr.io/gasparottog80-hash/papela-ai
+      DOCKER_CONFIG: ${{ runner.temp }}/papela-ghcr-docker
+    steps:
+      - name: Check out exact master commit without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.12'
+          enable-cache: false
+
+      - name: Require successful baseline CI for this exact commit
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          sha = os.environ['GITHUB_SHA']
+          url = ('https://api.github.com/repos/gasparottog80-hash/PAPELA.AI/actions/runs'
+                 f'?head_sha={sha}&event=push&per_page=30')
+          request = urllib.request.Request(url, headers={
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'papela-private-publish/1',
+          })
+          with urllib.request.urlopen(request, timeout=15) as response:
+              runs = json.load(response).get('workflow_runs', [])
+          assert any(run.get('head_sha') == sha
+                     and run.get('head_branch') == 'master'
+                     and run.get('name') == 'Reproducible baseline'
+                     and run.get('conclusion') == 'success'
+                     for run in runs), 'Exact-commit baseline CI is not green'
+          PY
+
+      - name: Load exclusive read-only extractor identity
+        env:
+          CI_DEPLOY_KEY: ${{ secrets.PAPELA_EXTRACTOR_CI_SSH_KEY }}
+        run: |
+          [[ -n "$CI_DEPLOY_KEY" ]]
+          actual=$(ssh-keygen -lf .github/ssh_known_hosts -E sha256 | awk '{print $2}')
+          [[ "$actual" == 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' ]]
+          eval "$(ssh-agent -a "$RUNNER_TEMP/papela-publish-agent.sock" -s)" >/dev/null
+          printf 'SSH_AUTH_SOCK=%s\nSSH_AGENT_PID=%s\n' "$SSH_AUTH_SOCK" "$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          printf '%s\n' "$CI_DEPLOY_KEY" | ssh-add -t 1800 - >/dev/null 2>&1
+          [[ "$(ssh-add -l -E sha256 | awk '{print $2}')" == 'SHA256:SwxgjtF6Mzjf2/Bh7/5EfJmMR5Xiu8XlwYSRqnaUx7U' ]]
+          printf 'GIT_SSH_COMMAND=ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o UserKnownHostsFile=%s/.github/ssh_known_hosts -o GlobalKnownHostsFile=/dev/null\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Build locked SHA image without cache
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          uv lock --check
+          docker build --no-cache --ssh "default=$SSH_AUTH_SOCK" \
+            --build-arg "RELEASE_COMMIT=$GITHUB_SHA" \
+            --tag "papelaai:sha-$GITHUB_SHA" .
+          docker run --rm --network none "papelaai:sha-$GITHUB_SHA" \
+            python scripts/verify_extractor.py
+
+      - name: Remove build-only SSH identity
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${SSH_AGENT_PID:-}" ]]; then
+            ssh-add -D >/dev/null 2>&1 || true
+            ssh-agent -k >/dev/null
+          fi
+
+      - name: Scan exact runtime before any registry login or push
+        run: |
+          docker save --output "$RUNNER_TEMP/papela-private-runtime.tar" "papelaai:sha-$GITHUB_SHA"
+          docker run --rm \
+            --mount "type=bind,source=$RUNNER_TEMP,target=/scan" \
+            aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --input /scan/papela-private-runtime.tar \
+            --cache-dir /scan/trivy-cache --scanners vuln,secret \
+            --severity CRITICAL,HIGH --format json \
+            --output /scan/papela-private-scan.json --timeout 5m --quiet
+          python - "$RUNNER_TEMP/papela-private-scan.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding='utf-8') as handle:
+              report = json.load(handle)
+          results = report.get('Results') or []
+          assert results, 'Image scan produced no targets'
+          severe = sum(v.get('Severity') in {'CRITICAL', 'HIGH'}
+                       for result in results
+                       for v in result.get('Vulnerabilities') or [])
+          secrets = sum(len(result.get('Secrets') or []) for result in results)
+          assert severe == 0 and secrets == 0, 'Runtime scan blocked publication'
+          PY
+
+      - name: Push only the full-commit SHA tag and capture registry manifest digest
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          tag="$IMAGE_REPOSITORY:sha-$GITHUB_SHA"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          docker tag "papelaai:sha-$GITHUB_SHA" "$tag"
+          digest=$(docker push "$tag" | awk '/digest: sha256:/{print $3}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          reference="$IMAGE_REPOSITORY@$digest"
+          docker pull "$reference" >/dev/null
+          [[ "$(docker image inspect --format '{{.Id}}' "$reference")" == \
+             "$(docker image inspect --format '{{.Id}}' "papelaai:sha-$GITHUB_SHA")" ]]
+          [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")" == "$GITHUB_SHA" ]]
+          printf 'Private GHCR reference: `%s`\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove registry session and local private scan files
+        if: ${{ always() }}
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$RUNNER_TEMP/papela-private-runtime.tar" "$RUNNER_TEMP/papela-private-scan.json"

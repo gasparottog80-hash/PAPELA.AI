@@ -1,4 +1,4 @@
-"""Fail-closed single-host release controller. No registry or remote deploy here.
+"""Fail-closed single-host release controller. Registry publication is separate.
 
 The state directory is external to Git and backed up separately. Commands that
 change services require --execute. See docs/gate7-deploy-rollback.md.
@@ -35,6 +35,8 @@ SCHEMA_FILES = (
     "ops/010_runtime_role.sql",
 )
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+OCI_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+REGISTRY_REPOSITORY = "ghcr.io/gasparottog80-hash/papela-ai"
 BACKUP_ID = re.compile(r"backup-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 SCANNER = (
     "aquasec/trivy@sha256:"
@@ -133,6 +135,20 @@ def extractor_commit(commit: str | None = None) -> str:
     return commit
 
 
+def extractor_version(commit: str | None = None) -> str:
+    lock_bytes = (
+        git_blob(commit, "uv.lock") if commit else (ROOT / "uv.lock").read_bytes()
+    )
+    lock = tomllib.loads(lock_bytes.decode("utf-8"))
+    package = next(p for p in lock["package"] if p["name"] == "papela-fiscal-extractor")
+    version = package.get("version")
+    if not isinstance(version, str) or not re.fullmatch(
+        r"[0-9]+(?:\.[0-9]+)*", version
+    ):
+        raise ReleaseError("EXTRACTOR_VERSION_INVALID")
+    return version
+
+
 def image_details(tag: str) -> tuple[str, str]:
     payload = json.loads(run("docker", "image", "inspect", tag))
     if len(payload) != 1:
@@ -141,6 +157,38 @@ def image_details(tag: str) -> tuple[str, str]:
     return image["Id"], image["Config"]["Labels"].get(
         "org.opencontainers.image.revision", ""
     )
+
+
+def image_metadata(reference: str) -> dict[str, Any]:
+    payload = json.loads(run("docker", "image", "inspect", reference))
+    if len(payload) != 1 or not isinstance(payload[0], dict):
+        raise ReleaseError("IMAGE_MISSING")
+    return payload[0]
+
+
+def registry_reference(manifest: dict[str, Any], *, required: bool) -> str | None:
+    """Never mistake a local image/config digest for an OCI manifest digest."""
+    digest = manifest.get("registry_digest")
+    if digest is None:
+        if required:
+            raise ReleaseError("REGISTRY_DIGEST_REQUIRED")
+        return None
+    if not isinstance(digest, str) or not OCI_DIGEST.fullmatch(digest):
+        raise ReleaseError("REGISTRY_DIGEST_INVALID")
+    if manifest.get("image_repository") != REGISTRY_REPOSITORY:
+        raise ReleaseError("REGISTRY_REPOSITORY_INVALID")
+    expected_tag = f"{REGISTRY_REPOSITORY}:sha-{manifest['commit_sha']}"
+    if manifest.get("registry_tag") != expected_tag:
+        raise ReleaseError("REGISTRY_TAG_INVALID")
+    return f"{REGISTRY_REPOSITORY}@{digest}"
+
+
+def release_image(manifest: dict[str, Any], *, synthetic: bool) -> str:
+    if synthetic:
+        return str(manifest["image_tag"])
+    reference = registry_reference(manifest, required=True)
+    assert reference is not None
+    return reference
 
 
 def scan_image(tag: str) -> dict[str, int]:
@@ -312,13 +360,18 @@ def compose_env(args: argparse.Namespace, image: str) -> dict[str, str]:
 
 
 def compose(args: argparse.Namespace, image: str, *command: str) -> str:
+    files = ["-f", "docker-compose.prod.yml"]
+    if not args.synthetic:
+        # Age-based retention is a host-wide journald policy, not Docker's
+        # size/count-only json-file rotation. The overlay removes inherited
+        # logging options using Compose !override (>= 2.24.4).
+        files.extend(["-f", "docker-compose.prod.journald.yml"])
     return run(
         "docker",
         "compose",
         "--env-file",
         str(args.env_file),
-        "-f",
-        "docker-compose.prod.yml",
+        *files,
         *command,
         env=compose_env(args, image),
     )
@@ -351,20 +404,45 @@ def ci_green(commit: str) -> None:
         raise ReleaseError("CI_NOT_GREEN")
 
 
-def validate_manifest(manifest: dict[str, Any]) -> None:
+def validate_manifest(
+    manifest: dict[str, Any], *, require_registry: bool = False
+) -> None:
     commit = manifest.get("commit_sha")
     if not isinstance(commit, str) or not SHA.fullmatch(commit):
         raise ReleaseError("RELEASE_SHA_INVALID")
     tag = f"papelaai:sha-{commit}"
     if manifest.get("image_tag") != tag:
         raise ReleaseError("RELEASE_TAG_INVALID")
-    image_id, label = image_details(tag)
+    reference = registry_reference(manifest, required=require_registry)
+    inspect_ref = reference if require_registry and reference is not None else tag
+    image_id, label = image_details(inspect_ref)
     if image_id != manifest.get("image_id") or label != commit:
         raise ReleaseError("IMAGE_PROVENANCE_MISMATCH")
+    if require_registry:
+        metadata = image_metadata(inspect_ref)
+        if inspect_ref not in metadata.get("RepoDigests", []):
+            raise ReleaseError("REGISTRY_DIGEST_NOT_INSTALLED")
+        if not isinstance(manifest.get("build_timestamp_utc"), str) or not manifest[
+            "build_timestamp_utc"
+        ]:
+            raise ReleaseError("BUILD_TIMESTAMP_REQUIRED")
+        if not isinstance(manifest.get("extractor_version"), str):
+            raise ReleaseError("EXTRACTOR_VERSION_REQUIRED")
+        if not isinstance(manifest.get("schema_version"), str):
+            raise ReleaseError("SCHEMA_VERSION_REQUIRED")
+    if manifest.get("extractor_version") is not None and (
+        manifest["extractor_version"] != extractor_version(commit)
+    ):
+        raise ReleaseError("EXTRACTOR_VERSION_MISMATCH")
     if manifest.get("extractor_commit") != extractor_commit(commit):
         raise ReleaseError("EXTRACTOR_PROVENANCE_MISMATCH")
     if manifest.get("schema_fingerprint") != schema_fingerprint(commit):
         raise ReleaseError("SCHEMA_FINGERPRINT_MISMATCH")
+    if (
+        require_registry
+        and manifest.get("schema_version") != manifest["schema_fingerprint"]
+    ):
+        raise ReleaseError("SCHEMA_VERSION_INVALID")
     if manifest.get("scan") != {"critical_high": 0, "secrets": 0}:
         raise ReleaseError("SCAN_ATTESTATION_INVALID")
 
@@ -397,7 +475,8 @@ def backup_verified(args: argparse.Namespace, image: str) -> None:
 def preflight(
     args: argparse.Namespace, manifest: dict[str, Any]
 ) -> dict[str, Any] | None:
-    validate_manifest(manifest)
+    validate_manifest(manifest, require_registry=not args.synthetic)
+    image = release_image(manifest, synthetic=args.synthetic)
     if not args.synthetic:
         if run("git", "rev-parse", "HEAD") != manifest["commit_sha"]:
             raise ReleaseError("CHECKOUT_COMMIT_MISMATCH")
@@ -432,12 +511,14 @@ def preflight(
         raise ReleaseError("CURRENT_RELEASE_UNKNOWN")
     if current is None and args.initial:
         for service in ("api", "worker"):
-            if compose(args, manifest["image_tag"], "ps", "-a", "-q", service):
+            if compose(args, image, "ps", "-a", "-q", service):
                 raise ReleaseError("INITIAL_DEPLOY_FOUND_EXISTING_SERVICE")
     if current is not None:
         previous = read_json(manifest_path(args.state_dir, current["commit_sha"]))
-        validate_manifest(previous)
-        if values.get("PAPELA_APP_IMAGE") != previous["image_tag"]:
+        validate_manifest(previous, require_registry=not args.synthetic)
+        if values.get("PAPELA_APP_IMAGE") != release_image(
+            previous, synthetic=args.synthetic
+        ):
             raise ReleaseError("ACTIVE_ENV_IMAGE_DRIFT")
         if previous["schema_fingerprint"] != manifest["schema_fingerprint"]:
             if not args.migration_review:
@@ -468,8 +549,8 @@ def preflight(
         and args.smoke_url.startswith("https://localhost:")
     ):
         raise ReleaseError("SYNTHETIC_SCOPE_INVALID")
-    compose(args, manifest["image_tag"], "config", "--quiet")
-    backup_verified(args, manifest["image_tag"])
+    compose(args, image, "config", "--quiet")
+    backup_verified(args, image)
     return previous
 
 
@@ -496,13 +577,20 @@ def readiness(args: argparse.Namespace) -> None:
 
 
 def service_images(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
+    reference = release_image(manifest, synthetic=args.synthetic)
     for service in ("api", "worker"):
-        container = compose(args, manifest["image_tag"], "ps", "-q", service)
+        container = compose(args, reference, "ps", "-q", service)
         if not container:
             raise ReleaseError("SERVICE_NOT_RUNNING")
         image = run("docker", "inspect", "--format", "{{.Image}}", container)
         if image != manifest["image_id"]:
             raise ReleaseError("ACTIVE_IMAGE_MISMATCH")
+        if not args.synthetic:
+            configured = run(
+                "docker", "inspect", "--format", "{{.Config.Image}}", container
+            )
+            if configured != reference:
+                raise ReleaseError("ACTIVE_REGISTRY_DIGEST_MISMATCH")
         health = run(
             "docker", "inspect", "--format", "{{.State.Health.Status}}", container
         )
@@ -549,13 +637,25 @@ def record(args: argparse.Namespace) -> None:
         raise ReleaseError("RELEASE_SHA_INVALID")
     run("git", "cat-file", "-e", f"{commit}^{{commit}}")
     tag = f"papelaai:sha-{commit}"
+    digest = args.registry_digest or None
+    candidate = {
+        "commit_sha": commit,
+        "image_tag": tag,
+        "image_repository": REGISTRY_REPOSITORY,
+        "registry_tag": f"{REGISTRY_REPOSITORY}:sha-{commit}",
+        "registry_digest": digest,
+    }
+    reference = registry_reference(candidate, required=bool(digest)) or tag
     with exclusive_lock(args.state_dir):
         path = manifest_path(args.state_dir, commit)
         if path.exists():
             raise ReleaseError("RELEASE_ALREADY_RECORDED")
-        image_id, label = image_details(tag)
+        image_id, label = image_details(reference)
         if label != commit:
             raise ReleaseError("IMAGE_PROVENANCE_MISMATCH")
+        metadata = image_metadata(reference)
+        if digest and reference not in metadata.get("RepoDigests", []):
+            raise ReleaseError("REGISTRY_DIGEST_NOT_INSTALLED")
         provenance = json.loads(
             run(
                 "docker",
@@ -563,26 +663,29 @@ def record(args: argparse.Namespace) -> None:
                 "--rm",
                 "--network",
                 "none",
-                tag,
+                reference,
                 "python",
                 "scripts/verify_extractor.py",
             )
         )
         if provenance.get("installed_commit") != extractor_commit(commit):
             raise ReleaseError("EXTRACTOR_PROVENANCE_MISMATCH")
-        scan = scan_image(tag)
+        scan = scan_image(reference)
         manifest = {
-            "commit_sha": commit,
-            "image_tag": tag,
+            **candidate,
             "image_id": image_id,
-            "registry_digest": None,
             "created_at_utc": utc(),
+            "build_timestamp_utc": metadata.get("Created"),
             "extractor_commit": extractor_commit(commit),
+            "extractor_version": extractor_version(commit),
             "schema_fingerprint": schema_fingerprint(commit),
+            "schema_version": schema_fingerprint(commit),
             "scan": scan,
             "migration_applied": False,
+            "migration_compatibility": None,
             "backup_id": None,
             "previous_release": None,
+            "previous_release_digest": None,
             "status": "candidate",
         }
         write_json(path, manifest)
@@ -599,6 +702,7 @@ def deploy(args: argparse.Namespace) -> None:
         changed = False
         try:
             previous = preflight(args, manifest)
+            image = release_image(manifest, synthetic=args.synthetic)
             if previous and previous["commit_sha"] == args.commit:
                 raise ReleaseError("ALREADY_ACTIVE")
             migration_needed = (
@@ -610,12 +714,10 @@ def deploy(args: argparse.Namespace) -> None:
                     raise ReleaseError("MIGRATOR_CHECKOUT_MISMATCH")
                 event("migration_started", args.commit)
                 try:
-                    compose(
-                        args, manifest["image_tag"], "up", "-d", "--wait", "postgres"
-                    )
+                    compose(args, image, "up", "-d", "--wait", "postgres")
                     compose(
                         args,
-                        manifest["image_tag"],
+                        image,
                         "--profile",
                         "ops",
                         "run",
@@ -632,10 +734,11 @@ def deploy(args: argparse.Namespace) -> None:
                 if previous is not None:
                     manifest["migration_review_sha256"] = sha256(args.migration_review)
                     manifest["old_app_compatible"] = True
+                    manifest["migration_compatibility"] = "backward-compatible"
             changed = True
             compose(
                 args,
-                manifest["image_tag"],
+                image,
                 "up",
                 "-d",
                 "--force-recreate",
@@ -644,23 +747,30 @@ def deploy(args: argparse.Namespace) -> None:
                 "worker",
                 "caddy",
             )
-            synthetic_ca(args, manifest["image_tag"])
+            synthetic_ca(args, image)
             readiness(args)
             service_images(args, manifest)
             smoke(args)
             if args.simulate_post_deploy_failure:
                 raise ReleaseError("SYNTHETIC_FAILURE_INJECTED")
-            set_env_image(args.env_file, manifest["image_tag"])
+            set_env_image(args.env_file, image)
             manifest.update(
                 status="active",
                 backup_id=args.backup_id,
                 previous_release=previous["commit_sha"] if previous else None,
+                previous_release_digest=(
+                    previous.get("registry_digest") if previous else None
+                ),
                 promoted_at_utc=utc(),
             )
             write_json(manifest_path(args.state_dir, args.commit), manifest)
             write_json(
                 args.state_dir / "active.json",
-                {"commit_sha": args.commit, "image_id": manifest["image_id"]},
+                {
+                    "commit_sha": args.commit,
+                    "image_id": manifest["image_id"],
+                    "registry_digest": manifest.get("registry_digest"),
+                },
             )
             event("deploy_succeeded", args.commit, backup_id=args.backup_id)
         except (ReleaseError, OSError, ValueError, KeyError) as exc:
@@ -682,10 +792,11 @@ def rollback_to(args: argparse.Namespace, previous: dict[str, Any]) -> None:
     commit = previous["commit_sha"]
     event("rollback_started", commit)
     try:
-        validate_manifest(previous)
+        validate_manifest(previous, require_registry=not args.synthetic)
+        image = release_image(previous, synthetic=args.synthetic)
         compose(
             args,
-            previous["image_tag"],
+            image,
             "up",
             "-d",
             "--force-recreate",
@@ -697,10 +808,14 @@ def rollback_to(args: argparse.Namespace, previous: dict[str, Any]) -> None:
         readiness(args)
         service_images(args, previous)
         smoke(args)
-        set_env_image(args.env_file, previous["image_tag"])
+        set_env_image(args.env_file, image)
         write_json(
             args.state_dir / "active.json",
-            {"commit_sha": commit, "image_id": previous["image_id"]},
+            {
+                "commit_sha": commit,
+                "image_id": previous["image_id"],
+                "registry_digest": previous.get("registry_digest"),
+            },
         )
         previous["status"] = "active"
         previous["promoted_at_utc"] = utc()
@@ -751,6 +866,7 @@ def main() -> None:
     )
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--commit", default="")
+    parser.add_argument("--registry-digest", default="")
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--backup-id", default="")
     parser.add_argument("--smoke-url", default="")

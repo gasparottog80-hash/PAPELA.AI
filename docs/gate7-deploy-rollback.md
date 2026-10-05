@@ -1,5 +1,12 @@
 # Gate 7 — controlled release and rollback (local/CI candidate)
 
+Update for Production Enablement: `ops/release.py` now supports a recorded
+private GHCR manifest digest and requires it for non-synthetic preflight,
+deploy and rollback. The manual-only publication workflow is not dispatched;
+no package, real digest or host drill is evidenced. The original Gate 7 text
+below describes its historical local/CI evidence. See
+`docs/production-enablement.md` for the prospective digest-pinned procedure.
+
 This is **not** authorization to deploy to a VPS, publish a container image,
 change DNS, open a firewall, or accept customer data. Gates 1–6 remain required.
 The current workflow builds/scans on GitHub Actions and performs a localhost-only

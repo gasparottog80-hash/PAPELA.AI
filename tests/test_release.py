@@ -141,3 +141,119 @@ def test_preflight_returns_full_previous_release_not_active_pointer(
         "schema_fingerprint": "same-schema",
     }
     assert release.preflight(args, target) == previous
+
+
+def test_production_requires_real_oci_manifest_digest() -> None:
+    commit = "a" * 40
+    manifest = {
+        "commit_sha": commit,
+        "image_tag": f"papelaai:sha-{commit}",
+        "image_repository": release.REGISTRY_REPOSITORY,
+        "registry_tag": f"{release.REGISTRY_REPOSITORY}:sha-{commit}",
+        "registry_digest": None,
+    }
+    with pytest.raises(release.ReleaseError, match="REGISTRY_DIGEST_REQUIRED"):
+        release.registry_reference(manifest, required=True)
+    manifest["registry_digest"] = "sha256:" + "0" * 63
+    with pytest.raises(release.ReleaseError, match="REGISTRY_DIGEST_INVALID"):
+        release.registry_reference(manifest, required=True)
+    manifest["registry_digest"] = "sha256:" + "0" * 64
+    assert release.registry_reference(manifest, required=True) == (
+        f"{release.REGISTRY_REPOSITORY}@sha256:{'0' * 64}"
+    )
+    manifest["image_repository"] = "ghcr.io/attacker/package"
+    with pytest.raises(release.ReleaseError, match="REGISTRY_REPOSITORY_INVALID"):
+        release.registry_reference(manifest, required=True)
+
+
+def test_production_manifest_requires_installed_matching_registry_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit = "b" * 40
+    reference = f"{release.REGISTRY_REPOSITORY}@sha256:{'c' * 64}"
+    manifest = {
+        "commit_sha": commit,
+        "image_tag": f"papelaai:sha-{commit}",
+        "image_repository": release.REGISTRY_REPOSITORY,
+        "registry_tag": f"{release.REGISTRY_REPOSITORY}:sha-{commit}",
+        "registry_digest": "sha256:" + "c" * 64,
+        "image_id": "sha256:" + "d" * 64,
+        "extractor_commit": "e" * 40,
+        "extractor_version": "0.1.0",
+        "build_timestamp_utc": "2026-10-05T00:00:00Z",
+        "schema_fingerprint": "f" * 64,
+        "schema_version": "f" * 64,
+        "scan": {"critical_high": 0, "secrets": 0},
+    }
+    monkeypatch.setattr(
+        release, "image_details", lambda ref: (manifest["image_id"], commit)
+    )
+    monkeypatch.setattr(release, "image_metadata", lambda ref: {"RepoDigests": []})
+    with pytest.raises(release.ReleaseError, match="REGISTRY_DIGEST_NOT_INSTALLED"):
+        release.validate_manifest(manifest, require_registry=True)
+    monkeypatch.setattr(
+        release, "image_metadata", lambda ref: {"RepoDigests": [reference]}
+    )
+    monkeypatch.setattr(release, "extractor_commit", lambda _commit: "e" * 40)
+    monkeypatch.setattr(release, "extractor_version", lambda _commit: "0.1.0")
+    monkeypatch.setattr(release, "schema_fingerprint", lambda _commit: "f" * 64)
+    release.validate_manifest(manifest, require_registry=True)
+    manifest["schema_version"] = "old"
+    with pytest.raises(release.ReleaseError, match="SCHEMA_VERSION_INVALID"):
+        release.validate_manifest(manifest, require_registry=True)
+    manifest["schema_version"] = "f" * 64
+    manifest["extractor_version"] = None
+    with pytest.raises(release.ReleaseError, match="EXTRACTOR_VERSION_REQUIRED"):
+        release.validate_manifest(manifest, require_registry=True)
+
+
+def test_compose_selects_age_retention_overlay_only_for_production(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env = tmp_path / "release.env"
+    env.write_text("PAPELA_PROJECT_NAME=papela-gate7-test\n", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def capture(*command: str, **_kwargs: object) -> str:
+        calls.append(command)
+        return ""
+
+    monkeypatch.setattr(release, "run", capture)
+    args = argparse.Namespace(env_file=env, synthetic=False)
+    release.compose(args, "repository@sha256:digest", "config", "--quiet")
+    assert "docker-compose.prod.journald.yml" in calls[-1]
+    args.synthetic = True
+    release.compose(args, "papelaai:sha-synthetic", "config", "--quiet")
+    assert "docker-compose.prod.journald.yml" not in calls[-1]
+
+
+def test_production_rollback_uses_previous_manifest_digest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    previous_commit = "d" * 40
+    previous_digest = "sha256:" + "e" * 64
+    previous = {
+        "commit_sha": previous_commit,
+        "image_tag": f"papelaai:sha-{previous_commit}",
+        "image_repository": release.REGISTRY_REPOSITORY,
+        "registry_tag": f"{release.REGISTRY_REPOSITORY}:sha-{previous_commit}",
+        "registry_digest": previous_digest,
+        "image_id": "sha256:" + "f" * 64,
+    }
+    images: list[str] = []
+    monkeypatch.setattr(release, "validate_manifest", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        release, "compose", lambda _args, image, *_command: images.append(image)
+    )
+    monkeypatch.setattr(release, "readiness", lambda _args: None)
+    monkeypatch.setattr(release, "service_images", lambda _args, _manifest: None)
+    monkeypatch.setattr(release, "smoke", lambda _args: None)
+    monkeypatch.setattr(
+        release, "set_env_image", lambda _path, image: images.append(image)
+    )
+    args = argparse.Namespace(
+        state_dir=tmp_path, env_file=tmp_path / "synthetic.env", synthetic=False
+    )
+    release.rollback_to(args, previous)
+    assert images == [f"{release.REGISTRY_REPOSITORY}@{previous_digest}"] * 2
+    assert release.active(tmp_path)["registry_digest"] == previous_digest

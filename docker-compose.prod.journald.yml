@@ -1,0 +1,21 @@
+# Linux/systemd production overlay. Requires Docker Compose >= 2.24.4 for
+# !override. Keep the base json-file policy for local/Docker Desktop drills.
+services:
+  postgres:
+    logging: !override
+      driver: journald
+  migrate:
+    logging: !override
+      driver: journald
+  backup:
+    logging: !override
+      driver: journald
+  api:
+    logging: !override
+      driver: journald
+  worker:
+    logging: !override
+      driver: journald
+  caddy:
+    logging: !override
+      driver: journald

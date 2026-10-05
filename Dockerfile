@@ -73,6 +73,7 @@ FROM gcr.io/distroless/base-debian13@sha256:0896741ba5bafd3ac87ea025a5f578952f2d
 # Build provenance is supplied by the release job; it never contains secrets.
 ARG RELEASE_COMMIT=unspecified
 LABEL org.opencontainers.image.revision="${RELEASE_COMMIT}"
+LABEL org.opencontainers.image.source="https://github.com/gasparottog80-hash/PAPELA.AI"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

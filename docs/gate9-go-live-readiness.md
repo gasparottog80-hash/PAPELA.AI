@@ -1,7 +1,8 @@
 # Gate 9 — go-live readiness (decision record)
 
-Date: 2026-10-04. Decision: **BLOCKED / NO-GO for customer data**. This is
-an audit and a future deployment plan, not permission to provision, publish,
+Date: 2026-10-04. Decision: **BLOCKED / NO-GO for customer data**. See
+`docs/production-enablement.md` for subsequent local-only preparations. This
+is an audit and a future deployment plan, not permission to provision, publish,
 deploy, process customer documents, or claim legal compliance. Gates 1–8
 passed their stated local/CI scopes; that is not evidence of a live service.
 The reviewed baseline is `0feaf1cbcf7255d00a1beecc46e459d9f1637a46`,
@@ -141,10 +142,11 @@ visibility, and sign/attest provenance if adopted. Production pulls only
 `ghcr.io/gasparottog80-hash/papela-ai@sha256:<manifest digest>` using a
 read-only pull identity. Tags are discovery aids, not deployment identities.
 Keep active/previous digests. A Docker image ID/config digest is not the
-registry manifest digest. The current `ops/release.py` requires a software
-change before it may assert this contract; manually setting its
-`registry_digest` field would be false evidence. Do not make an automatic
-publish trigger from a public PR or expose the runtime image as a workflow
+registry manifest digest. The later Production Enablement changes add
+digest-aware release validation and a manual-only publication workflow, but
+neither a real private package nor a pushed manifest has been verified;
+manually setting `registry_digest` would still be false evidence. Do not make
+an automatic publish trigger from a public PR or expose the runtime image as a workflow
 artifact. [GitHub's registry permissions](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 and [billing policy](https://docs.github.com/en/billing/concepts/product-billing/github-packages)
 must be rechecked at authorization time.
@@ -225,9 +227,9 @@ Docker `json-file` currently rotates by `max-size`/`max-file`, **not days**.
 Do not `find -delete` or truncate Docker-owned active log files; Docker warns
 that external access can interfere with the daemon. Obtain a legal period
 for each log class, maximum disk budget, access list and incident-hold
-procedure. Then choose and test an age-aware host logging design (for
-example journald with `MaxRetentionSec`/`SystemMaxUse`, plus per-container
-driver compatibility) and a verified expiry drill. Until this is deployed,
+procedure. A later local-only journald overlay and host-policy renderer are
+documented in `docs/production-enablement.md`; the actual Linux host policy,
+driver behavior and verified expiry drill remain untested. Until deployed,
 age retention is a pilot blocker. Never forward raw container logs to an
 external service without canary-based redaction review.
 [Docker's json-file guidance](https://docs.docker.com/engine/logging/drivers/json-file/)

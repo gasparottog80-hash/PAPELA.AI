@@ -106,7 +106,9 @@ def validate_inventory(path: Path) -> dict[str, Any]:
             or not isinstance(backup["storage_class"], str)
             or backup["storage_class"] not in {"local", "offsite"}
             or not isinstance(backup["status"], str)
-            or backup["status"] not in {"present", "expired", "deleted", "invalid"}
+            or backup["status"] not in {
+                "present", "missing", "expired", "deleted", "invalid"
+            }
             or type(backup["legal_hold"]) is not bool
         ):
             raise JournalError("inventory backup state invalid")
@@ -122,6 +124,8 @@ def validate_inventory(path: Path) -> dict[str, Any]:
             raise JournalError("inventory backup chronology invalid")
         if backup["status"] == "invalid":
             raise JournalError("inventory backup state unverified")
+        if backup["status"] == "missing":
+            raise JournalError("inventory backup missing")
         if backup["status"] == "expired" and datetime.now(UTC) < expiry:
             raise JournalError("inventory backup not yet expired")
         if backup["storage_class"] == "local":

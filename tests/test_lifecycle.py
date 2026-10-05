@@ -411,7 +411,10 @@ def test_unlisted_local_archive_blocks_compaction_and_readiness(context, tmp_pat
 
 @pytest.mark.parametrize(
     "scenario",
-    ["missing", "corrupt", "checksum", "offsite", "hold", "invalid", "malformed"],
+    [
+        "missing", "missing_copy", "corrupt", "checksum", "offsite", "hold",
+        "invalid", "malformed",
+    ],
 )
 def test_compaction_fail_closed_inventory_scenarios(context, tmp_path, scenario):
     client, repo, journal, settings = context
@@ -439,11 +442,14 @@ def test_compaction_fail_closed_inventory_scenarios(context, tmp_path, scenario)
     elif scenario == "offsite":
         report = compact_journal(repo, journal)
         assert not report[0]["eligible"] and "offsite" in report[0]["reason"]
-    elif scenario in {"invalid", "malformed"}:
+    elif scenario in {"invalid", "malformed", "missing_copy"}:
         inventory = json.loads(path.read_text(encoding="utf-8"))
-        inventory["backups"][0]["status"] = (
-            "invalid" if scenario == "invalid" else []
-        )
+        if scenario == "invalid":
+            inventory["backups"][0]["status"] = "invalid"
+        elif scenario == "missing_copy":
+            inventory["backups"][0]["status"] = "missing"
+        else:
+            inventory["backups"][0]["status"] = []
         from app.erasure import _digest
 
         body = {key: inventory[key] for key in ("version", "coverage", "backups")}
