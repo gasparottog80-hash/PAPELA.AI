@@ -257,3 +257,30 @@ def test_production_rollback_uses_previous_manifest_digest(
     release.rollback_to(args, previous)
     assert images == [f"{release.REGISTRY_REPOSITORY}@{previous_digest}"] * 2
     assert release.active(tmp_path)["registry_digest"] == previous_digest
+
+
+def test_synthetic_programmatic_record_keeps_optional_digest_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "a" * 40
+
+    def fake_run(*command: str, **_kwargs: object) -> str:
+        if command[:2] == ("git", "cat-file"):
+            return ""
+        return json.dumps({"installed_commit": "b" * 40})
+
+    monkeypatch.setattr(release, "run", fake_run)
+    monkeypatch.setattr(release, "image_details", lambda _tag: ("sha256:id", commit))
+    monkeypatch.setattr(
+        release, "image_metadata", lambda _tag: {"Created": "2026-10-05T00:00:00Z"}
+    )
+    monkeypatch.setattr(release, "extractor_commit", lambda _commit: "b" * 40)
+    monkeypatch.setattr(release, "extractor_version", lambda _commit: "0.1.0")
+    monkeypatch.setattr(release, "schema_fingerprint", lambda _commit: "c" * 64)
+    monkeypatch.setattr(
+        release, "scan_image", lambda _tag: {"critical_high": 0, "secrets": 0}
+    )
+    args = argparse.Namespace(commit=commit, state_dir=tmp_path, synthetic=True)
+    release.record(args)
+    recorded = release.read_json(release.manifest_path(tmp_path, commit))
+    assert recorded["registry_digest"] is None

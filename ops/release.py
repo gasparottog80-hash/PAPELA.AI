@@ -637,7 +637,10 @@ def record(args: argparse.Namespace) -> None:
         raise ReleaseError("RELEASE_SHA_INVALID")
     run("git", "cat-file", "-e", f"{commit}^{{commit}}")
     tag = f"papelaai:sha-{commit}"
-    digest = args.registry_digest or None
+    # Existing synthetic drills call record() with a programmatic Namespace
+    # predating this optional CLI argument. Production still requires a real
+    # digest at preflight; a missing value never falls back to an image ID.
+    digest = getattr(args, "registry_digest", "") or None
     candidate = {
         "commit_sha": commit,
         "image_tag": tag,
