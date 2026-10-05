@@ -9,7 +9,11 @@
 > [Gate 5 observability design](docs/gate5-observability.md) adds private
 > metrics and privacy-minimized logs. The [Gate 6 backup/restore runbook](docs/gate6-backup-restore.md)
 > covers logical database recovery. The [Gate 7 release/rollback runbook](docs/gate7-deploy-rollback.md)
-> defines a localhost-only deploy drill. None of these gates is a go-live approval.
+> defines a localhost-only deploy drill. [Gate 8](docs/gate8-data-lifecycle.md)
+> documents the synthetic erasure journal and retention controls. The
+> [Gate 9 go-live decision](docs/gate9-go-live-readiness.md) is **NO-GO** for
+> customer data; no VPS, offsite restore, registry digest or live alerting
+> has been verified.
 
 On-premise fiscal-document pipeline. The safe MVP path extracts embedded text
 from digital PDFs; native PaddleOCR remains optional and is **not** permitted
@@ -49,9 +53,10 @@ immutable `tenant_id`, and cross-tenant reads/deletes return 404. Rate limits
 are per tenant, in-process. See the migration procedure in
 [the security audit](docs/gate3-security.md) before upgrading any existing DB.
 
-## LGPD compliance
+## Data lifecycle and privacy boundaries
 
-The raw PDF is the sensitive artifact; the pipeline minimizes its lifetime on disk.
+Both the raw PDF and the extracted result can contain personal/fiscal data;
+the pipeline minimizes the raw file's lifetime on disk.
 
 - Data minimization (`PAPELA_PURGE_AFTER_DONE`, fail-safe default `true`): the
   worker persists the extracted text and then deletes the raw PDF from disk, so a
@@ -71,9 +76,12 @@ The raw PDF is the sensitive artifact; the pipeline minimizes its lifetime on di
 - Auditability: every deletion emits a structured log line (`pdf.deleted`, with
   job_id + reason) and stamps `jobs.purged_at`. `GET /v1/jobs/{id}/audit`
   cross-checks the DB stamp against the actual filesystem.
-- Extracted JSON stays in Postgres until the owner deletes a terminal job via
-  `DELETE /v1/jobs/{id}`. Automatic JSON retention remains a separate legal
-  and operational decision for a later gate.
+- Extracted JSON stays in Postgres until owner deletion, operator offboarding
+  or the worker's configured terminal-job retention sweep (technical default
+  30 days). Erasure markers and restore reconciliation prevent an older
+  backup from silently reviving deleted records; production journal
+  compaction remains disabled. Technical defaults are **not** an approved
+  legal retention policy. See [Gate 8](docs/gate8-data-lifecycle.md).
 - Processing, queue and storage are local. No third-party document API calls.
 
 Relevant env vars (see `.env.example`):
@@ -167,5 +175,5 @@ implementation by design.
   labeled fixture set + per-field accuracy report.
 - Known limits: rate limiter is per-process (single node); move to
   Postgres/Redis to scale out. The explicit tenant migration must be applied
-  by a schema owner before production startup. No automatic retention sweep
-  exists for extracted JSON yet (only for raw PDFs).
+  by a schema owner before production startup. The worker's automatic
+  terminal-job/result sweep is a technical default, not a legal policy.
